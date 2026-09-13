@@ -6,8 +6,12 @@ param location string = resourceGroup().location
 @description('Base name used for the Azure resources.')
 param appName string = 'lex-pickup-pro'
 
-@description('Existing Cosmos DB account name to reuse for the club data store.')
-param cosmosAccountName string = 'dtranllc'
+@description('Existing Cosmos DB account endpoint. Do not create a new account.')
+param cosmosEndpoint string = 'https://dtranllc.documents.azure.com:443/'
+
+@description('Primary or secondary key for the existing Cosmos DB account.')
+@secure()
+param cosmosKey string
 
 @description('Existing Cosmos database name.')
 param cosmosDatabaseName string = 'clubs'
@@ -53,10 +57,6 @@ var frontendOrigin = 'https://${frontendHost}'
 var backendImageResolved = backendImage
 var frontendImageResolved = frontendImage
 
-resource cosmosAccount 'Microsoft.DocumentDB/databaseAccounts@2024-11-15' existing = {
-  name: cosmosAccountName
-}
-
 resource managedEnvironment 'Microsoft.App/managedEnvironments@2024-03-01' = {
   name: '${appName}-env'
   location: location
@@ -86,7 +86,7 @@ module backend 'modules/container-app.bicep' = {
       }
       {
         name: 'COSMOS_ENDPOINT'
-        value: cosmosAccount.properties.documentEndpoint
+        value: cosmosEndpoint
       }
       {
         name: 'COSMOS_DATABASE'
@@ -102,7 +102,7 @@ module backend 'modules/container-app.bicep' = {
       }
       {
         name: 'COSMOS_KEY'
-        value: cosmosAccount.listKeys().primaryMasterKey
+        value: cosmosKey
       }
       {
         name: 'COSMOS_AUTH_MODE'
@@ -164,6 +164,6 @@ module frontend 'modules/container-app.bicep' = {
 
 output backendFqdn string = backend.outputs.fqdn
 output frontendFqdn string = frontend.outputs.fqdn
-output cosmosEndpoint string = cosmosAccount.properties.documentEndpoint
+output cosmosEndpoint string = cosmosEndpoint
 output cosmosDatabase string = cosmosDatabaseName
 output cosmosContainer string = cosmosContainerName

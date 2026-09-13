@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.47.16.16243",
-      "templateHash": "10564280724651880310"
+      "templateHash": "3627680496735817996"
     }
   },
   "parameters": {
@@ -23,11 +23,17 @@
         "description": "Base name used for the Azure resources."
       }
     },
-    "cosmosAccountName": {
+    "cosmosEndpoint": {
       "type": "string",
-      "defaultValue": "dtranllc",
+      "defaultValue": "https://dtranllc.documents.azure.com:443/",
       "metadata": {
-        "description": "Existing Cosmos DB account name to reuse for the club data store."
+        "description": "Existing Cosmos DB account endpoint. Do not create a new account."
+      }
+    },
+    "cosmosKey": {
+      "type": "securestring",
+      "metadata": {
+        "description": "Primary or secondary key for the existing Cosmos DB account."
       }
     },
     "cosmosDatabaseName": {
@@ -185,7 +191,7 @@
               },
               {
                 "name": "COSMOS_ENDPOINT",
-                "value": "[reference(resourceId('Microsoft.DocumentDB/databaseAccounts', parameters('cosmosAccountName')), '2024-11-15').documentEndpoint]"
+                "value": "[parameters('cosmosEndpoint')]"
               },
               {
                 "name": "COSMOS_DATABASE",
@@ -201,7 +207,7 @@
               },
               {
                 "name": "COSMOS_KEY",
-                "value": "[listKeys(resourceId('Microsoft.DocumentDB/databaseAccounts', parameters('cosmosAccountName')), '2024-11-15').primaryMasterKey]"
+                "value": "[parameters('cosmosKey')]"
               },
               {
                 "name": "COSMOS_AUTH_MODE",
@@ -638,7 +644,7 @@
     },
     "cosmosEndpoint": {
       "type": "string",
-      "value": "[reference(resourceId('Microsoft.DocumentDB/databaseAccounts', parameters('cosmosAccountName')), '2024-11-15').documentEndpoint]"
+      "value": "[parameters('cosmosEndpoint')]"
     },
     "cosmosDatabase": {
       "type": "string",

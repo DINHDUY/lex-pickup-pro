@@ -27,6 +27,10 @@ jobs:
       CLUB_INVITE_CODE: ${{ secrets.CLUB_INVITE_CODE || 'LEX2026' }}
       BACKEND_IMAGE: ghcr.io/dinhduy/lex-pickup-pro/backend:latest
       FRONTEND_IMAGE: ghcr.io/dinhduy/lex-pickup-pro/frontend:latest
+      COSMOS_ENDPOINT: ${{ secrets.COSMOS_ENDPOINT || 'https://dtranllc.documents.azure.com:443/' }}
+      COSMOS_KEY: ${{ secrets.COSMOS_KEY }}
+      COSMOS_DATABASE: ${{ secrets.COSMOS_DATABASE || 'clubs' }}
+      COSMOS_CONTAINER: ${{ secrets.COSMOS_CONTAINER || 'club_data' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -50,7 +54,11 @@ jobs:
               backendImage="$BACKEND_IMAGE" \
               frontendImage="$FRONTEND_IMAGE" \
               jwtSecret="$JWT_SECRET" \
-              clubInviteCode="$CLUB_INVITE_CODE"
+              clubInviteCode="$CLUB_INVITE_CODE" \
+              cosmosEndpoint="$COSMOS_ENDPOINT" \
+              cosmosKey="$COSMOS_KEY" \
+              cosmosDatabaseName="$COSMOS_DATABASE" \
+              cosmosContainerName="$COSMOS_CONTAINER"
 
       - name: Smoke test
         run: |
