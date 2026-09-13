@@ -1,0 +1,8 @@
+# Codex Autopilot for this workspace.
+# Full auto-approval with unsandboxed (danger-full-access) permissions.
+# Equivalent to --dangerously-bypass-approvals-and-sandbox / --yolo.
+# Commands run without human prompts and without the workspace sandbox.
+
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+default_permissions = ":danger-full-access"

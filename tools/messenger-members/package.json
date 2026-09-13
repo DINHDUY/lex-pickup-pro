@@ -1,0 +1,14 @@
+{
+  "name": "messenger-members",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Attended Playwright export of Messenger group chat members",
+  "scripts": {
+    "extract": "node extract.mjs",
+    "install-browsers": "playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "^1.58.0"
+  }
+}

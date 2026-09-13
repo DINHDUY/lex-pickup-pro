@@ -1,0 +1,145 @@
+# Deployment and club operations
+
+## Supported topology
+
+Place an HTTPS reverse proxy in front of the frontend container. nginx serves the compiled app and forwards `/api/` to FastAPI over a private Docker network. PostgreSQL is also private. The Compose file publishes only the web port.
+
+1. Copy `.env.example` to `.env` at the repository root.
+2. Use a **fresh PostgreSQL database**, not a demo database.
+3. Set the values below for your hostname.
+4. Build with `docker compose up --build -d`.
+5. Terminate TLS at your reverse proxy and forward to the published web port.
+6. Create the first administrator interactively.
+
+```dotenv
+APP_ENV=production
+WEB_PORT=8080
+POSTGRES_PASSWORD=<unique-random-url-safe-password>
+JWT_SECRET=<at-least-32-random-characters>
+COOKIE_SECURE=true
+FRONTEND_URL=https://football.example.com
+CORS_ORIGINS=["https://football.example.com"]
+CLUB_INVITE_CODE=<a-unique-code-for-your-club>
+REGISTRATION_ENABLED=true
+DEMO_ENABLED=false
+```
+
+Generate separate secrets with `openssl rand -hex 32`. Hex passwords work in the composed database URL without additional URL encoding. Do not commit `.env`. Prefer a secrets manager in managed deployments. A proxy on a public host should bind or firewall the upstream web port appropriately; only the HTTPS entry point should be exposed to members.
+
+Create an administrator after the service is healthy:
+
+```bash
+docker compose exec backend python -m app.seed --admin-email organizer@example.com
+```
+
+This prompts for a display name and password; no password is passed on the command line or stored in shell history. It initializes the two fixed teams and an active season if needed. `REGISTRATION_ENABLED=false` closes code-based registration, while individually issued profile invitations still work.
+
+## Authentication and authorization
+
+- Argon2 password hashes; no plaintext password storage.
+- JWTs expire after 12 hours and use a fixed accepted algorithm, issuer, and audience.
+- Sessions live in HttpOnly, SameSite=Lax cookies, scoped to `/api`; production adds Secure.
+- Mutating browser requests validate Origin against the explicit CORS list. Same-origin deployment avoids exposing bearer tokens to JavaScript.
+- Every authenticated request checks current account activity and session version. Signing out revokes the account’s previous sessions. Password resets and privilege changes also revoke them.
+- Player/captain/admin permissions are enforced on the backend, not just hidden in the UI.
+- Login and registration are limited to 20 attempts per IP per 10 minutes in one process. Use a shared edge limiter for multiple workers. Only trust forwarded client-IP headers from your controlled proxy network.
+- Invitation tokens are random, stored only as SHA-256 hashes, expire after 7 days, bind to one email/profile, and are single use. Share them privately; avoid collecting full query strings in frontend access analytics.
+
+The nginx configuration includes a content security policy, frame blocking, MIME sniffing protection, a referrer policy, and a restricted permissions policy. Authentication responses and API data use `Cache-Control: no-store`. Frontend fonts are bundled and served locally.
+
+When nginx sits behind another load balancer or TLS proxy, configure nginx's `set_real_ip_from` and `real_ip_header` for **only that trusted proxy**, or implement the per-client limiter at the public edge. Otherwise nginx sees the upstream proxy as one shared IP and the application login limit applies to the whole club. Never trust arbitrary internet-supplied forwarding headers.
+
+## Database lifecycle
+
+The entrypoint runs migrations and idempotent initialization before starting the single API worker. If deploying multiple replicas, run migrations once as a release job, then start application workers separately.
+
+```bash
+# Inspect / upgrade
+docker compose exec backend alembic current
+docker compose exec backend alembic upgrade head
+
+# Generate a migration during development, from backend/
+uv run alembic revision --autogenerate -m "Describe schema change"
+# Review the generated migration before applying it.
+uv run alembic upgrade head
+uv run alembic check
+```
+
+PostgreSQL uses row locks for RSVP admission and match mutations. SQLite serializes local write requests with `BEGIN IMMEDIATE`; it is intended for local use or small single-instance demos. Never put a SQLite file on a shared network filesystem for multiple workers.
+
+Primary teams have stable IDs: 1 = Old Gentlemen, 2 = Young Boys. Lineups hold match-side assignments independently. Deactivating a player preserves their historical appearances and event attribution. Before deactivating a member, captains should remove them from upcoming lineups and have them change any outstanding Going responses.
+
+Back up PostgreSQL regularly:
+
+```bash
+docker compose exec -T db pg_dump -U lex -d lex_pickup -Fc > lex-pickup.backup
+```
+
+Store backups outside the application host, encrypt them, and test restoration to a separate database. `docker compose down` preserves named volumes. Adding `--volumes` permanently deletes the database volume; use it only for a disposable installation you intend to erase.
+
+## Password recovery
+
+Verify the member’s identity through your club’s usual channel, then run:
+
+```bash
+docker compose exec backend python -m app.accounts reset-password player@example.com
+# Local equivalent, from backend/
+uv run python -m app.accounts reset-password player@example.com
+```
+
+The command prompts for a new password twice and revokes all previous sessions. Deliver the new password privately. This release uses administrator-assisted recovery; it does not send reset emails.
+
+## Scheduled reminders
+
+Set:
+
+```dotenv
+REMINDER_WEBHOOK_URL=https://your-integration.example.com/lex-reminders
+REMINDER_WEBHOOK_SECRET=<a-separate-random-secret>
+```
+
+Run hourly from your scheduler (adjust the directory):
+
+```cron
+0 * * * * cd /srv/lex-pickup-pro && docker compose exec -T backend python -m app.reminders --deliver >> /var/log/lex-reminders.log 2>&1
+```
+
+Without `--deliver`, the command prints forwardable text only. It finds scheduled games starting in the next 24 hours. Successful deliveries set `reminder_sent_at`; editing a scheduled game clears that marker so an updated reminder can be sent. Failed deliveries exit nonzero for scheduler monitoring. Run only one reminder job at a time in SQLite.
+
+Webhook example:
+
+```json
+{
+  "event": "match.reminder",
+  "match_id": 19,
+  "text": "⚽ Saturday morning football\nSaturday, Sep 19 at 10:00 AM EDT\n…"
+}
+```
+
+The receiver should:
+
+1. Compute HMAC-SHA256 of the exact raw request body using the shared secret.
+2. Constant-time compare its hex digest with `X-Lex-Signature`.
+3. Deduplicate the `Idempotency-Key`, such as `match-19-20260919T140000Z-reminder`.
+4. Return a 2xx response only after accepting the reminder for delivery.
+
+A failed batch or network timeout can cause a retry, so receiver-side idempotency is essential. The key includes the kickoff timestamp, so rescheduling a game allows a fresh reminder. Editing notes without changing kickoff does not trigger a duplicate message at an idempotent receiver.
+
+Facebook personal group chats do not offer arbitrary bot posting through this app. Use an integration channel you control, or forward reminders manually. A future Meta Page chatbot requires its own supported API, permissions, and user-consent flow.
+
+## PWA and offline behavior
+
+The production build generates a web manifest, maskable icon, static precache, and service worker. Native install prompts are supported where available; iPhone users use Safari → Share → Add to Home Screen. HTTPS or localhost is required.
+
+The service worker never caches `/api` responses or queues mutations. Offline users see an explicit connection message; initial sign-in/profile loading may show a retry state until connected. Already displayed data may remain in memory, but updates must be confirmed online. Update prompts let a user finish their work before reloading the new version.
+
+## Deployment verification
+
+- `/api/v1/health` must return `{"status":"ok"}` and database connectivity must work.
+- Verify all supplied tests and the PostgreSQL CI job against the committed lockfiles.
+- Sign in as a real player and captain. Confirm permissions, RSVP persistence, lineups, scoring, and sharing on a phone.
+- Check that production cookies are Secure/HttpOnly and the site is served over HTTPS.
+- Test backup restoration and the reminder receiver if automatic delivery is enabled.
+- Check logs, disk usage, database backups, and certificate renewal in your host’s monitoring system.
+
+No hosted deployment, Facebook credentials, TLS certificate, backup service, or external webhook is provisioned automatically by the source code.

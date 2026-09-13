@@ -1,0 +1,15 @@
+# Use with: docker compose --env-file .env.real -f compose.yaml -f compose.real.yaml ...
+# The project name gives the real club its own database volume and network.
+name: lex-pickup-real
+services:
+  backend:
+    environment:
+      DEMO_ENABLED: "false"
+      REGISTRATION_ENABLED: "false"
+      SESSION_COOKIE_NAME: lex_real_session
+      JWT_SECRET: ${REAL_JWT_SECRET:?Set a unique REAL_JWT_SECRET in .env.real}
+      FRONTEND_URL: http://localhost:8081
+      CORS_ORIGINS: '["http://localhost:8081","http://127.0.0.1:8081"]'
+  frontend:
+    ports: !override
+      - "127.0.0.1:8081:8080"

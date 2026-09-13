@@ -1,0 +1,47 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: lex
+      POSTGRES_DB: lex_pickup
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-lex-database-password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lex -d lex_pickup"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://lex:${POSTGRES_PASSWORD:-local-lex-database-password}@db:5432/lex_pickup
+      APP_ENV: ${APP_ENV:-development}
+      JWT_SECRET: ${JWT_SECRET:-local-development-secret-change-before-deployment}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:8080}
+      CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:8080","http://127.0.0.1:8080"]}
+      CLUB_INVITE_CODE: ${CLUB_INVITE_CODE:-LEX2026}
+      REGISTRATION_ENABLED: ${REGISTRATION_ENABLED:-true}
+      DEMO_ENABLED: ${DEMO_ENABLED:-true}
+      REMINDER_WEBHOOK_URL: ${REMINDER_WEBHOOK_URL:-}
+      REMINDER_WEBHOOK_SECRET: ${REMINDER_WEBHOOK_SECRET:-}
+      FORWARDED_ALLOW_IPS: "*"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
