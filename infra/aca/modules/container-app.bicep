@@ -58,11 +58,11 @@ var registries = empty(registryServer) ? [] : [
 
 var envVars = [for item in environmentVariables: union({
     name: item.name
-  }, empty(item.value) ? {} : {
+  }, contains(item, 'value') && !empty(item.value) ? {
     value: item.value
-  }, empty(item.secretRef) ? {} : {
+  } : {}, contains(item, 'secretRef') && !empty(item.secretRef) ? {
     secretRef: item.secretRef
-  })]
+  } : {})]
 
 resource app 'Microsoft.App/containerApps@2024-03-01' = {
   name: name

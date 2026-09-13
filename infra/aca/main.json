@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.47.16.16243",
-      "templateHash": "3627680496735817996"
+      "templateHash": "2203218773983441494"
     }
   },
   "parameters": {
@@ -251,7 +251,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.47.16.16243",
-              "templateHash": "1703988129559613972"
+              "templateHash": "4260159523037796727"
             }
           },
           "parameters": {
@@ -356,7 +356,7 @@
               {
                 "name": "envVars",
                 "count": "[length(parameters('environmentVariables'))]",
-                "input": "[union(createObject('name', parameters('environmentVariables')[copyIndex('envVars')].name), if(empty(parameters('environmentVariables')[copyIndex('envVars')].value), createObject(), createObject('value', parameters('environmentVariables')[copyIndex('envVars')].value)), if(empty(parameters('environmentVariables')[copyIndex('envVars')].secretRef), createObject(), createObject('secretRef', parameters('environmentVariables')[copyIndex('envVars')].secretRef)))]"
+                "input": "[union(createObject('name', parameters('environmentVariables')[copyIndex('envVars')].name), if(and(contains(parameters('environmentVariables')[copyIndex('envVars')], 'value'), not(empty(parameters('environmentVariables')[copyIndex('envVars')].value))), createObject('value', parameters('environmentVariables')[copyIndex('envVars')].value), createObject()), if(and(contains(parameters('environmentVariables')[copyIndex('envVars')], 'secretRef'), not(empty(parameters('environmentVariables')[copyIndex('envVars')].secretRef))), createObject('secretRef', parameters('environmentVariables')[copyIndex('envVars')].secretRef), createObject()))]"
               }
             ],
             "registrySecrets": "[if(empty(parameters('registryPassword')), createArray(), createArray(createObject('name', 'acr-password', 'value', parameters('registryPassword'))))]",
@@ -469,7 +469,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.47.16.16243",
-              "templateHash": "1703988129559613972"
+              "templateHash": "4260159523037796727"
             }
           },
           "parameters": {
@@ -574,7 +574,7 @@
               {
                 "name": "envVars",
                 "count": "[length(parameters('environmentVariables'))]",
-                "input": "[union(createObject('name', parameters('environmentVariables')[copyIndex('envVars')].name), if(empty(parameters('environmentVariables')[copyIndex('envVars')].value), createObject(), createObject('value', parameters('environmentVariables')[copyIndex('envVars')].value)), if(empty(parameters('environmentVariables')[copyIndex('envVars')].secretRef), createObject(), createObject('secretRef', parameters('environmentVariables')[copyIndex('envVars')].secretRef)))]"
+                "input": "[union(createObject('name', parameters('environmentVariables')[copyIndex('envVars')].name), if(and(contains(parameters('environmentVariables')[copyIndex('envVars')], 'value'), not(empty(parameters('environmentVariables')[copyIndex('envVars')].value))), createObject('value', parameters('environmentVariables')[copyIndex('envVars')].value), createObject()), if(and(contains(parameters('environmentVariables')[copyIndex('envVars')], 'secretRef'), not(empty(parameters('environmentVariables')[copyIndex('envVars')].secretRef))), createObject('secretRef', parameters('environmentVariables')[copyIndex('envVars')].secretRef), createObject()))]"
               }
             ],
             "registrySecrets": "[if(empty(parameters('registryPassword')), createArray(), createArray(createObject('name', 'acr-password', 'value', parameters('registryPassword'))))]",
