@@ -7,12 +7,11 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from pydantic import EmailStr, TypeAdapter, ValidationError
-from sqlalchemy import select
 
 from .config import get_settings
-from .db import SessionLocal
-from .models import RSVP, ClubNote, Lineup, Match, MatchEvent, Player, Rating, Season, Team, User
+from .domain.records import RSVP, ClubNote, Lineup, Match, MatchEvent, Player, Rating, Season, Team, User
 from .security import password_hasher
+from .storage.factory import get_store
 
 ROSTER = [
     ("David Mitchell", "Mitch", 1, "CM,CAM", 8.4, 8, "Right", "35–44"),
@@ -53,9 +52,24 @@ def seed(demo=False, admin_email=None, admin_player_id=None):
     settings = get_settings()
     if demo and (settings.app_env == "production" or not settings.demo_enabled):
         raise SystemExit("Demo seeding requires DEMO_ENABLED=true and a non-production environment")
-    with SessionLocal() as db:
+    name = ""
+    admin_hash = ""
+    password = ""
+    if admin_email:
+        if admin_player_id is None:
+            name = input("Admin display name: ").strip()
+            if not 2 <= len(name) <= 80:
+                raise SystemExit("Name must have 2–80 characters")
+        password = getpass.getpass("New admin password (10–128 characters): ")
+        if not 10 <= len(password) <= 128:
+            raise SystemExit("Password must have 10–128 characters")
+        if password != getpass.getpass("Confirm admin password: "):
+            raise SystemExit("Passwords do not match")
+        admin_hash = password_hasher.hash(password)
+
+    def initialize(db):
         if not db.get(Team, 1):
-            db.add_all(
+            db.insert_many(
                 [
                     Team(
                         id=1,
@@ -73,14 +87,12 @@ def seed(demo=False, admin_email=None, admin_player_id=None):
                     ),
                 ]
             )
-        if not db.scalar(select(Season).where(Season.active.is_(True))):
-            db.add(Season(name=f"{datetime.now().year} season", active=True))
-        db.commit()
+        if not db.first(Season, active=True):
+            db.insert(Season(name=f"{datetime.now().year} season", active=True))
         if demo:
-            if db.scalar(select(User).where(User.email == "admin@lexpickup.club")):
-                print("Demo data already exists. No changes made.")
-                return
-            if db.scalar(select(Player)):
+            if db.first(User, email="admin@lexpickup.club"):
+                return "Demo data already exists. No changes made."
+            if db.first(Player):
                 raise SystemExit("Demo seeding requires an empty roster; use a separate demo database")
             players = []
             for index, (name, nickname, team, positions, skill, jersey, foot, age) in enumerate(ROSTER, 1):
@@ -98,9 +110,8 @@ def seed(demo=False, admin_email=None, admin_player_id=None):
                     preferred_times="Saturday mornings",
                     injury_note="Recovering from an ankle sprain. Back in two weeks." if index == 11 else "",
                 )
-                db.add(p)
+                db.insert(p)
                 players.append(p)
-            db.flush()
             users = []
             for email, role, pid in [
                 ("admin@lexpickup.club", "admin", 1),
@@ -113,9 +124,8 @@ def seed(demo=False, admin_email=None, admin_player_id=None):
                     player_id=pid,
                     password_hash=password_hasher.hash("PickupPro2026!"),
                 )
-                db.add(u)
+                db.insert(u)
                 users.append(u)
-            db.flush()
             rng = random.Random(42)
             local = datetime.now(ZoneInfo("America/New_York"))
             next_game = (local + timedelta(days=(5 - local.weekday()) % 7)).replace(
@@ -123,7 +133,7 @@ def seed(demo=False, admin_email=None, admin_player_id=None):
             )
             if next_game <= local + timedelta(hours=1):
                 next_game += timedelta(days=7)
-            season = db.scalar(select(Season).where(Season.active.is_(True)))
+            season = db.first(Season, active=True)
             for week in range(-18, 5):
                 historical = week < 0
                 m = Match(
@@ -136,21 +146,20 @@ def seed(demo=False, admin_email=None, admin_player_id=None):
                     away_score=rng.randint(0, 5) if historical else 0,
                     created_by=users[0].id,
                 )
-                db.add(m)
-                db.flush()
+                db.insert(m)
                 sides = {
                     "home": [players[1]] + rng.sample([p for p in players[:12] if p.id not in (2, 11)], 6),
                     "away": [players[13]] + rng.sample([p for p in players[12:] if p.id != 14], 6),
                 }
                 if m.kind == "mixed":
-                    sides["home"][3], sides["away"][3] = sides["away"][3], sides["home"][3]
+                    sides["home"][3], sides["away"][3] = (sides["away"][3], sides["home"][3])
                 if historical:
                     for side, squad in sides.items():
                         for slot, p in enumerate(squad):
-                            db.add(Lineup(match_id=m.id, player_id=p.id, side=side, slot=slot))
-                            db.add(RSVP(match_id=m.id, player_id=p.id, status="going"))
+                            db.insert(Lineup(match_id=m.id, player_id=p.id, side=side, slot=slot))
+                            db.insert(RSVP(match_id=m.id, player_id=p.id, status="going"))
                             author = users[1] if p.id == users[0].player_id else users[0]
-                            db.add(
+                            db.insert(
                                 Rating(
                                     match_id=m.id,
                                     player_id=p.id,
@@ -161,7 +170,7 @@ def seed(demo=False, admin_email=None, admin_player_id=None):
                         for _ in range(m.home_score if side == "home" else m.away_score):
                             scorer = rng.choices(squad[1:], weights=[p.skill**3 for p in squad[1:]])[0]
                             assist = rng.choice([p for p in squad[1:] if p.id != scorer.id])
-                            db.add(
+                            db.insert(
                                 MatchEvent(
                                     match_id=m.id,
                                     player_id=scorer.id,
@@ -172,21 +181,20 @@ def seed(demo=False, admin_email=None, admin_player_id=None):
                                 )
                             )
                 else:
-                    # Leave room for the signed-in demo player to respond.
                     going = [p for squad in sides.values() for p in squad if p.id not in (1, 6, 13)][:11]
                     for p in players:
                         if p.id in (1, 6, 13):
                             continue
                         state = (
-                            "going" if p in going else ("out" if p.id == 11 else rng.choice(["maybe", "out"]))
+                            "going" if p in going else "out" if p.id == 11 else rng.choice(["maybe", "out"])
                         )
-                        db.add(RSVP(match_id=m.id, player_id=p.id, status=state))
+                        db.insert(RSVP(match_id=m.id, player_id=p.id, status=state))
                     if week == 0:
                         for side, squad in sides.items():
                             for slot, p in enumerate(squad):
                                 if p in going:
-                                    db.add(Lineup(match_id=m.id, player_id=p.id, side=side, slot=slot))
-            db.add_all(
+                                    db.insert(Lineup(match_id=m.id, player_id=p.id, side=side, slot=slot))
+            db.insert_many(
                 [
                     ClubNote(
                         title="A little earlier, a little more football",
@@ -205,39 +213,27 @@ def seed(demo=False, admin_email=None, admin_player_id=None):
                     ),
                 ]
             )
-            db.commit()
-            print("Created 24 players, 23 matches, and 3 demo accounts. Password: PickupPro2026!")
+            return "Created 24 players, 23 matches, and 3 demo accounts. Password: PickupPro2026!"
         elif admin_email:
-            if db.scalar(select(User).where(User.email == admin_email.lower())):
+            if db.first(User, email=admin_email.lower()):
                 raise SystemExit("An account with that email already exists")
             if admin_player_id is not None:
                 p = db.get(Player, admin_player_id)
-                if not p or not p.active or db.scalar(select(User).where(User.player_id == p.id)):
+                if not p or not p.active or db.first(User, player_id=p.id):
                     raise SystemExit("Select an active player without an account")
             else:
-                name = input("Admin display name: ").strip()
                 if not 2 <= len(name) <= 80:
                     raise SystemExit("Name must have 2–80 characters")
                 p = Player(name=name)
-                db.add(p)
-            password = getpass.getpass("New admin password (10–128 characters): ")
+                db.insert(p)
             if not 10 <= len(password) <= 128:
                 raise SystemExit("Password must have 10–128 characters")
-            if password != getpass.getpass("Confirm admin password: "):
-                raise SystemExit("Passwords do not match")
-            db.flush()
-            db.add(
-                User(
-                    email=admin_email.lower(),
-                    password_hash=password_hasher.hash(password),
-                    role="admin",
-                    player_id=p.id,
-                )
-            )
-            db.commit()
-            print("Administrator created.")
+            db.insert(User(email=admin_email.lower(), password_hash=admin_hash, role="admin", player_id=p.id))
+            return "Administrator created."
         else:
-            print("Teams and active season initialized. Use --admin-email to create an administrator.")
+            return "Teams and active season initialized. Use --admin-email to create an administrator."
+
+    print(get_store().execute(initialize))
 
 
 if __name__ == "__main__":

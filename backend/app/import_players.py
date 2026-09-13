@@ -12,13 +12,12 @@ from typing import Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
-from sqlalchemy import select, text
-from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
 
 from .config import get_settings
-from .db import SessionLocal
-from .models import Player, PlayerImport, Team, User
+from .domain.club import ClubData
+from .domain.records import Player, PlayerImport, Team, User
+from .storage.factory import get_store
+from .storage.interfaces import StorageError, StorageLimit
 
 MAX_BYTES = 5 * 1024 * 1024
 
@@ -40,7 +39,7 @@ class SourceRow(StrictModel):
     @field_validator("profileUrl", "photoUrl")
     @classmethod
     def https_url(cls, value):
-        if value and not re.match(r"^https://[^/\s]+(?:/[^\s]*)?$", value):
+        if value and (not re.match("^https://[^/\\s]+(?:/[^\\s]*)?$", value)):
             raise ValueError("Export URLs must be empty or HTTPS")
         return value
 
@@ -66,8 +65,8 @@ class ReviewRow(StrictModel):
 
 class Review(StrictModel):
     version: Literal[1] = 1
-    source: str = Field(default="messenger-members", pattern=r"^[a-z0-9][a-z0-9_-]{0,79}$")
-    source_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source: str = Field(default="messenger-members", pattern="^[a-z0-9][a-z0-9_-]{0,79}$")
+    source_fingerprint: str = Field(pattern="^[0-9a-f]{64}$")
     reviewed: bool = False
     rows: list[ReviewRow] = Field(max_length=5000)
 
@@ -101,7 +100,7 @@ def read_source(payload: bytes) -> list[SourceRow]:
         except ValidationError as exc:
             raise ImportProblem(f"Invalid member fields at row {index}") from exc
         name, _ = clean_name(row.name)
-        if name and not 2 <= len(name) <= 80:
+        if name and (not 2 <= len(name) <= 80):
             raise ImportProblem(f"Player name must be 2–80 characters at row {index}")
         rows.append(row)
     return rows
@@ -109,14 +108,14 @@ def read_source(payload: bytes) -> list[SourceRow]:
 
 def clean_name(value: str) -> tuple[str, str]:
     value = unicodedata.normalize("NFC", value)
-    if any(unicodedata.category(c).startswith("C") and not c.isspace() for c in value):
+    if any((unicodedata.category(c).startswith("C") and (not c.isspace()) for c in value)):
         raise ImportProblem("Names cannot contain invisible control characters")
     name = " ".join(value.split())
     if name == "Admin ·":
-        return "", "Badge-only row: missing identity; excluded for review"
+        return ("", "Badge-only row: missing identity; excluded for review")
     if name.endswith(" Admin ·"):
-        return name.removesuffix(" Admin ·"), "Removed trailing Messenger admin badge"
-    return name, "Whitespace/Unicode normalized" if name != value else ""
+        return (name.removesuffix(" Admin ·"), "Removed trailing Messenger admin badge")
+    return (name, "Whitespace/Unicode normalized" if name != value else "")
 
 
 def normalized(value: str) -> str:
@@ -131,14 +130,14 @@ def fingerprint(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def preview(db: Session, payload: bytes, previous: Review | None = None) -> Review:
+def preview(db: ClubData, payload: bytes, previous: Review | None = None) -> Review:
     source = previous.source if previous else "messenger-members"
     rows = read_source(payload)
-    counts = Counter(normalized(clean_name(row.name)[0]) for row in rows)
-    names, mappings, old_rows = defaultdict(list), defaultdict(list), defaultdict(list)
-    for player in db.scalars(select(Player)):
+    counts = Counter((normalized(clean_name(row.name)[0]) for row in rows))
+    names, mappings, old_rows = (defaultdict(list), defaultdict(list), defaultdict(list))
+    for player in db.records(Player):
         names[normalized(player.name)].append(player.id)
-    for mapping in db.scalars(select(PlayerImport).where(PlayerImport.source == source)):
+    for mapping in [row for row in db.records(PlayerImport) if row.source == source]:
         mappings[mapping.source_key].append(mapping)
     if previous:
         for row in previous.rows:
@@ -150,23 +149,22 @@ def preview(db: Session, payload: bytes, previous: Review | None = None) -> Revi
         key = source_key(name)
         mapped = mappings[key][0] if len(mappings[key]) == 1 else None
         old = old_rows[key][0] if len(old_rows[key]) == 1 else None
-        action, player_id = "create", None
+        action, player_id = ("create", None)
         import_id = mapped.import_id if mapped else old.import_id if old else str(uuid4())
         if not name:
             action = "exclude"
         elif counts[normalized(name)] > 1 or len(mappings[key]) > 1:
-            action, note = "unresolved", "Duplicate source name: explicitly resolve each identity"
-            # Each ambiguous row needs its own decision, not a shared mapping.
+            action, note = ("unresolved", "Duplicate source name: explicitly resolve each identity")
             import_id = str(uuid4())
         elif mapped:
-            action, player_id = "unchanged", mapped.player_id
+            action, player_id = ("unchanged", mapped.player_id)
         elif old:
-            action, player_id = old.action, old.existing_player_id
-            name, note = old.name, old.note
+            action, player_id = (old.action, old.existing_player_id)
+            name, note = (old.name, old.note)
         elif names[normalized(name)]:
-            action, note = "unresolved", "Name collision: choose an explicit player ID or a distinct person"
+            action, note = ("unresolved", "Name collision: choose an explicit player ID or a distinct person")
         elif has_imports or previous:
-            action, note = "unresolved", "New or renamed source entry: review its identity before applying"
+            action, note = ("unresolved", "New or renamed source entry: review its identity before applying")
         result.rows.append(
             ReviewRow(
                 row=index,
@@ -183,103 +181,101 @@ def preview(db: Session, payload: bytes, previous: Review | None = None) -> Revi
     return result
 
 
-def apply_review(db: Session, payload: bytes, review: Review) -> dict[str, int]:
-    """Owns one transaction. The supplied session must have no active transaction."""
+def apply_review(db: ClubData, payload: bytes, review: Review) -> dict[str, int]:
+    """Validate and mutate a private snapshot; Store.execute commits all changes atomically."""
     rows = read_source(payload)
     if not review.reviewed:
         raise ImportProblem("Review the manifest, resolve entries, then set reviewed to true")
     if fingerprint(payload) != review.source_fingerprint:
         raise ImportProblem("Source changed since preview; generate a new review")
-    if sorted(row.row for row in review.rows) != list(range(1, len(rows) + 1)):
+    if sorted((row.row for row in review.rows)) != list(range(1, len(rows) + 1)):
         raise ImportProblem("Manifest must cover every source row exactly once")
     if len({row.import_id for row in review.rows}) != len(review.rows):
         raise ImportProblem("Each manifest row must have a unique import_id")
-    if any(row.action == "unresolved" for row in review.rows):
+    if any((row.action == "unresolved" for row in review.rows)):
         raise ImportProblem("Resolve or exclude all unresolved entries before applying")
     counts = dict(created=0, matched=0, unchanged=0, excluded=0, unresolved=0)
-    try:
-        # Serialize importers before any identity lookup on either supported database.
-        if db.get_bind().dialect.name == "sqlite":
-            db.execute(text("BEGIN IMMEDIATE"))
-        elif db.get_bind().dialect.name == "postgresql":
-            db.execute(text("SELECT pg_advisory_xact_lock(725491306)"))
-        if db.scalar(
-            select(User.id).where(
-                User.email.in_(["admin@lexpickup.club", "captain@lexpickup.club", "player@lexpickup.club"])
-            )
-        ):
-            raise ImportProblem("Use a separate real-club database; this database contains demo accounts")
-        if set(db.scalars(select(Team.id))) != {1, 2}:
-            raise ImportProblem("Initialize the two club teams with python -m app.seed first")
-        players = {p.id: p for p in db.scalars(select(Player))}
-        imports = {m.import_id: m for m in db.scalars(select(PlayerImport))}
-        target_ids = set()
-        accepted_names = Counter(normalized(r.name) for r in review.rows if r.action != "exclude")
-        for row in review.rows:
-            original = rows[row.row - 1]
-            cleaned, _ = clean_name(original.name)
-            key = source_key(cleaned)
-            if row.raw_name != original.name:
-                raise ImportProblem(f"Raw source name mismatch at row {row.row}")
-            if row.action == "exclude":
-                counts["excluded"] += 1
-                continue
-            if not cleaned or not 2 <= len(row.name) <= 80 or clean_name(row.name)[0] != row.name:
-                raise ImportProblem(f"Invalid reviewed player name at row {row.row}")
-            mapping = imports.get(row.import_id)
-            if mapping:
-                if mapping.source != review.source:
-                    raise ImportProblem(f"Import identity belongs to a different source at row {row.row}")
-                if row.existing_player_id not in (None, mapping.player_id):
-                    raise ImportProblem(f"Import identity cannot be reassigned at row {row.row}")
-                if mapping.source_key != key:
-                    if row.action != "match" or row.existing_player_id != mapping.player_id:
-                        raise ImportProblem(f"Renamed entry needs an explicit match at row {row.row}")
-                    mapping.source_key = key
-                    mapping.source_fingerprint = review.source_fingerprint
-                player = players[mapping.player_id]
-                counts["unchanged"] += 1
+    if next(
+        iter(
+            [
+                row.id
+                for row in [
+                    row
+                    for row in db.records(User)
+                    if row.email
+                    in ["admin@lexpickup.club", "captain@lexpickup.club", "player@lexpickup.club"]
+                ]
+            ]
+        ),
+        None,
+    ):
+        raise ImportProblem("Use a separate real-club database; this database contains demo accounts")
+    if set([row.id for row in db.records(Team)]) != {1, 2}:
+        raise ImportProblem("Initialize the two club teams with python -m app.seed first")
+    players = {p.id: p for p in db.records(Player)}
+    imports = {m.import_id: m for m in db.records(PlayerImport)}
+    target_ids = set()
+    accepted_names = Counter((normalized(r.name) for r in review.rows if r.action != "exclude"))
+    for row in review.rows:
+        original = rows[row.row - 1]
+        cleaned, _ = clean_name(original.name)
+        key = source_key(cleaned)
+        if row.raw_name != original.name:
+            raise ImportProblem(f"Raw source name mismatch at row {row.row}")
+        if row.action == "exclude":
+            counts["excluded"] += 1
+            continue
+        if not cleaned or not 2 <= len(row.name) <= 80 or clean_name(row.name)[0] != row.name:
+            raise ImportProblem(f"Invalid reviewed player name at row {row.row}")
+        mapping = imports.get(row.import_id)
+        if mapping:
+            if mapping.source != review.source:
+                raise ImportProblem(f"Import identity belongs to a different source at row {row.row}")
+            if row.existing_player_id not in (None, mapping.player_id):
+                raise ImportProblem(f"Import identity cannot be reassigned at row {row.row}")
+            if mapping.source_key != key:
+                if row.action != "match" or row.existing_player_id != mapping.player_id:
+                    raise ImportProblem(f"Renamed entry needs an explicit match at row {row.row}")
+                mapping.source_key = key
+                mapping.source_fingerprint = review.source_fingerprint
+            player = players[mapping.player_id]
+            counts["unchanged"] += 1
+        else:
+            if row.action == "unchanged":
+                raise ImportProblem(f"Import identity was not found at row {row.row}")
+            if row.action == "match":
+                player = players.get(row.existing_player_id)
+                if player is None:
+                    raise ImportProblem(f"Select an existing player ID at row {row.row}")
+                if any((m.player_id == player.id for m in imports.values())):
+                    raise ImportProblem(f"Reuse this player's existing import_id at row {row.row}")
+                counts["matched"] += 1
             else:
-                if row.action == "unchanged":
-                    raise ImportProblem(f"Import identity was not found at row {row.row}")
-                if row.action == "match":
-                    player = players.get(row.existing_player_id)
-                    if player is None:
-                        raise ImportProblem(f"Select an existing player ID at row {row.row}")
-                    if any(m.player_id == player.id for m in imports.values()):
-                        raise ImportProblem(f"Reuse this player's existing import_id at row {row.row}")
-                    counts["matched"] += 1
-                else:
-                    if row.existing_player_id is not None:
-                        raise ImportProblem(f"Create cannot select an existing player at row {row.row}")
-                    collision = (
-                        accepted_names[normalized(row.name)] > 1
-                        or any(normalized(p.name) == normalized(row.name) for p in players.values())
-                        or any(m.source == review.source and m.source_key == key for m in imports.values())
-                    )
-                    if collision and not row.allow_name_collision:
-                        raise ImportProblem(f"Name/source collision needs explicit review at row {row.row}")
-                    player = Player(name=row.name, photo_url=original.photoUrl)
-                    db.add(player)
-                    db.flush()
-                    players[player.id] = player
-                    counts["created"] += 1
-                mapping = PlayerImport(
-                    import_id=row.import_id,
-                    source=review.source,
-                    source_key=key,
-                    source_fingerprint=review.source_fingerprint,
-                    player_id=player.id,
+                if row.existing_player_id is not None:
+                    raise ImportProblem(f"Create cannot select an existing player at row {row.row}")
+                collision = (
+                    accepted_names[normalized(row.name)] > 1
+                    or any((normalized(p.name) == normalized(row.name) for p in players.values()))
+                    or any((m.source == review.source and m.source_key == key for m in imports.values()))
                 )
-                db.add(mapping)
-                imports[mapping.import_id] = mapping
-            if player.id in target_ids:
-                raise ImportProblem(f"Two accepted rows target the same player at row {row.row}")
-            target_ids.add(player.id)
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
+                if collision and (not row.allow_name_collision):
+                    raise ImportProblem(f"Name/source collision needs explicit review at row {row.row}")
+                player = Player(name=row.name, photo_url=original.photoUrl)
+                db.insert(player)
+                players[player.id] = player
+                counts["created"] += 1
+            mapping = PlayerImport(
+                import_id=row.import_id,
+                source=review.source,
+                source_key=key,
+                source_fingerprint=review.source_fingerprint,
+                player_id=player.id,
+            )
+            db.insert(mapping)
+            imports[mapping.import_id] = mapping
+        if player.id in target_ids:
+            raise ImportProblem(f"Two accepted rows target the same player at row {row.row}")
+        target_ids.add(player.id)
     return counts
 
 
@@ -315,32 +311,34 @@ def main():
         parser.error("Source and manifest cannot both use standard input")
     try:
         payload = read_file(args.file)
-        with SessionLocal() as db:
-            if args.apply:
-                if get_settings().demo_enabled:
-                    raise ImportProblem("Set DEMO_ENABLED=false and select the real-club database")
-                counts = apply_review(db, payload, read_review(args.manifest))
-                print(json.dumps(counts))
-            else:
-                previous = read_review(args.previous_manifest) if args.previous_manifest else None
-                review = preview(db, payload, previous)
-                output = review.model_dump_json(indent=2) + "\n"
-                if args.report:
-                    # Local report contains names. Create it privately and never clobber a review/source.
-                    import os
+        store = get_store()
+        if args.apply:
+            if get_settings().demo_enabled:
+                raise ImportProblem("Set DEMO_ENABLED=false and select the real-club database")
+            manifest = read_review(args.manifest)
+            counts = store.execute(lambda db: apply_review(db, payload, manifest))
+            print(json.dumps(counts))
+        else:
+            previous = read_review(args.previous_manifest) if args.previous_manifest else None
+            review = preview(store.read(), payload, previous)
+            output = review.model_dump_json(indent=2) + "\n"
+            if args.report:
+                import os
 
-                    fd = os.open(args.report, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                        handle.write(output)
-                else:
-                    print(output, end="")
-                print(json.dumps(dict(Counter(r.action for r in review.rows))), file=sys.stderr)
+                fd = os.open(args.report, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(output)
+            else:
+                print(output, end="")
+            print(json.dumps(dict(Counter((r.action for r in review.rows)))), file=sys.stderr)
     except (ImportProblem, OSError, ValueError) as exc:
         parser.exit(2, f"Import stopped: {exc}\n")
-    except SQLAlchemyError:
+    except StorageLimit as exc:
+        parser.exit(2, f"Import stopped: {exc}\n")
+    except StorageError:
         parser.exit(
             2,
-            "Import stopped: database operation failed; apply was rolled back. Check migrations and connectivity.\n",
+            "Import stopped: database operation failed; retry the same reviewed manifest after checking initialization and connectivity.\n",
         )
 
 

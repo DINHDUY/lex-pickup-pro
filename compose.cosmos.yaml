@@ -1,0 +1,43 @@
+# Standalone topology. Run with --env-file .env.cosmos -f compose.cosmos.yaml.
+services:
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_PROVIDER: cosmos
+      COSMOS_ENDPOINT: ${COSMOS_ENDPOINT:?Set COSMOS_ENDPOINT}
+      COSMOS_DATABASE: ${COSMOS_DATABASE:-lex_pickup_real}
+      COSMOS_CONTAINER: ${COSMOS_CONTAINER:-club_data}
+      COSMOS_CLUB_ID: ${COSMOS_CLUB_ID:-lex-pickup}
+      COSMOS_AUTH_MODE: ${COSMOS_AUTH_MODE:-managed_identity}
+      COSMOS_MANAGED_IDENTITY_CLIENT_ID: ${COSMOS_MANAGED_IDENTITY_CLIENT_ID:-}
+      COSMOS_CONSISTENCY_LEVEL: Strong
+      COSMOS_EMULATOR: ${COSMOS_EMULATOR:-false}
+      COSMOS_KEY: ${COSMOS_KEY:-}
+      COSMOS_MAX_DOCUMENTS: ${COSMOS_MAX_DOCUMENTS:-10000}
+      COSMOS_MAX_SNAPSHOT_BYTES: ${COSMOS_MAX_SNAPSHOT_BYTES:-32000000}
+      STORAGE_RETRY_ATTEMPTS: ${STORAGE_RETRY_ATTEMPTS:-4}
+      APP_ENV: ${APP_ENV:-production}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      FRONTEND_URL: ${FRONTEND_URL:?Set FRONTEND_URL}
+      CORS_ORIGINS: ${CORS_ORIGINS:?Set CORS_ORIGINS}
+      SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-lex_session}
+      DEMO_ENABLED: ${DEMO_ENABLED:-false}
+      REGISTRATION_ENABLED: ${REGISTRATION_ENABLED:-false}
+      CLUB_INVITE_CODE: ${CLUB_INVITE_CODE:?Set CLUB_INVITE_CODE}
+      REMINDER_WEBHOOK_URL: ${REMINDER_WEBHOOK_URL:-}
+      REMINDER_WEBHOOK_SECRET: ${REMINDER_WEBHOOK_SECRET:-}
+      FACEBOOK_AUTH_ENABLED: ${FACEBOOK_AUTH_ENABLED:-false}
+      FACEBOOK_APP_ID: ${FACEBOOK_APP_ID:-}
+      FACEBOOK_APP_SECRET: ${FACEBOOK_APP_SECRET:-}
+      FACEBOOK_REDIRECT_URI: ${FACEBOOK_REDIRECT_URI:-https://localhost:5173/login}
+      FORWARDED_ALLOW_IPS: '*'
+    restart: unless-stopped
+  frontend:
+    build: ./frontend
+    ports:
+      - '${WEB_PORT:-8082}:8080'
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped

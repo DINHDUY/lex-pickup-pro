@@ -186,8 +186,10 @@ test('captain can schedule, edit lineups, complete, and attribute a game', async
 
 test('administrator invites an existing player and the player claims their profile', async ({ page }) => {
   await login(page)
+  const name = `Invited Member ${Date.now()}`
+  const created = await page.request.post('/api/v1/players', { data: { name } })
+  expect(created.status()).toBe(201)
   await page.goto('/club')
-  const name = test.info().project.name === 'desktop' ? 'Michael Chen' : 'Carlos Rivera'
   const email = `member.${Date.now()}@example.com`
   const row = page.getByRole('row').filter({ hasText: name })
   await row.getByRole('button', { name: 'Invite', exact: true }).click()
@@ -197,6 +199,8 @@ test('administrator invites an existing player and the player claims their profi
   await page.getByRole('button', { name: 'Close dialog' }).click()
   await page.getByRole('button', { name: 'Account menu' }).click()
   await page.locator('.account-menu').getByRole('button', { name: 'Sign out', exact: true }).click()
+  // Navigation must wait for the committed logout; an immediate goto aborts its fetch on slower storage.
+  await expect(page).toHaveURL(/\/login$/)
   await page.goto(invitation)
   await expect(page.getByRole('heading', { name: 'Your spot is saved.' })).toBeVisible()
   await page.getByLabel('Email address', { exact: true }).fill(email)

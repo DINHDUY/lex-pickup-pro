@@ -10,9 +10,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Initial project documentation and contributor guidance.
 - Root-level automation with `make` targets for setup, development, linting, testing, and build workflows.
 - MIT license and open-source project metadata.
+- CI builds backend and frontend container images and publishes them to GitHub Container Registry from the default branch and `v*` tags.
 
 ### Changed
 - Standardized local development commands around Docker Compose, backend `uv`, and frontend `npm` scripts.
+- CI no longer runs the PostgreSQL service job or the Cosmos emulator job; image publish waits only on the main verify job.
 
 ## [0.1.0] - 2026-09-13
 

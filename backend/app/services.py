@@ -1,10 +1,8 @@
 from collections import defaultdict
 from datetime import timezone
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
-from .models import RSVP, Lineup, Match, MatchEvent, Player, Rating, Team
+from .domain.club import ClubData
+from .domain.records import RSVP, Lineup, Match, MatchEvent, Player, Rating, Team
 
 
 def iso(value):
@@ -12,19 +10,20 @@ def iso(value):
 
 
 def row_dict(row):
-    return {
-        c.name: iso(v) if hasattr(v := getattr(row, c.name), "isoformat") else v
-        for c in row.__table__.columns
-    }
+    return row.model_dump(mode="json")
 
 
-def statistics(db: Session, season_id: int | None = None):
+def statistics(db: ClubData, season_id: int | None = None):
     matches = {
         m.id: m
-        for m in db.scalars(select(Match).where(Match.status == "completed").order_by(Match.starts_at))
+        for m in sorted(
+            [row for row in db.records(Match) if row.status == "completed"],
+            key=lambda row: row.starts_at,
+            reverse=False,
+        )
         if season_id is None or m.season_id == season_id
     }
-    players = list(db.scalars(select(Player)))
+    players = list(db.records(Player))
     stats = {
         p.id: {
             "player_id": p.id,
@@ -48,11 +47,11 @@ def statistics(db: Session, season_id: int | None = None):
         for p in players
     }
     assignments = {}
-    for lineup in db.scalars(select(Lineup).join(Match).order_by(Match.starts_at, Lineup.id)):
+    for lineup in sorted(db.records(Lineup), key=lambda row: (db.get(Match, row.match_id).starts_at, row.id)):
         if lineup.match_id not in matches:
             continue
-        assignments[(lineup.match_id, lineup.player_id)] = lineup
-        m, s = matches[lineup.match_id], stats[lineup.player_id]
+        assignments[lineup.match_id, lineup.player_id] = lineup
+        m, s = (matches[lineup.match_id], stats[lineup.player_id])
         own, opponent = (
             (m.home_score, m.away_score) if lineup.side == "home" else (m.away_score, m.home_score)
         )
@@ -61,15 +60,15 @@ def statistics(db: Session, season_id: int | None = None):
         s["draws"] += own == opponent
         s["clean_sheets"] += opponent == 0
         s["form"].append("W" if own > opponent else "D" if own == opponent else "L")
-    for event in db.scalars(select(MatchEvent)):
+    for event in db.records(MatchEvent):
         if event.match_id in matches and event.kind == "goal":
             stats[event.player_id]["goals"] += 1
             if event.assist_player_id:
                 stats[event.assist_player_id]["assists"] += 1
-    for rating in db.scalars(select(Rating)):
+    for rating in db.records(Rating):
         if rating.match_id in matches:
             stats[rating.player_id]["ratings"].append(rating.value)
-    for rsvp in db.scalars(select(RSVP)):
+    for rsvp in db.records(RSVP):
         if rsvp.match_id in matches and rsvp.status == "going":
             stats[rsvp.player_id]["promises"] += 1
             stats[rsvp.player_id]["attended_promises"] += (rsvp.match_id, rsvp.player_id) in assignments
@@ -82,7 +81,7 @@ def statistics(db: Session, season_id: int | None = None):
         s.pop("promises")
         s["form"] = s["form"][-5:]
     teams = []
-    for team in db.scalars(select(Team).order_by(Team.id)):
+    for team in sorted(db.records(Team), key=lambda row: row.id, reverse=False):
         result = {
             **row_dict(team),
             "wins": 0,
@@ -119,24 +118,24 @@ def statistics(db: Session, season_id: int | None = None):
         "players": sorted(stats.values(), key=lambda s: (-s["goals"], -s["assists"], s["name"])),
         "teams": teams,
         "matches_played": len(matches),
-        "total_goals": sum(m.home_score + m.away_score for m in matches.values()),
+        "total_goals": sum((m.home_score + m.away_score for m in matches.values())),
         "trend": [{"month": month, **values} for month, values in sorted(trend.items())],
     }
 
 
-def match_summaries(db: Session, matches: list[Match], player_id: int):
+def match_summaries(db: ClubData, matches: list[Match], player_id: int):
     ids = [m.id for m in matches]
     responses = defaultdict(list)
     if ids:
-        for r in db.scalars(select(RSVP).where(RSVP.match_id.in_(ids))):
+        for r in [row for row in db.records(RSVP) if row.match_id in ids]:
             responses[r.match_id].append(r)
     return [
         {
             **row_dict(m),
-            "going": sum(r.status == "going" for r in responses[m.id]),
+            "going": sum((r.status == "going" for r in responses[m.id])),
             "going_player_ids": [r.player_id for r in responses[m.id] if r.status == "going"],
-            "maybe": sum(r.status == "maybe" for r in responses[m.id]),
-            "out": sum(r.status == "out" for r in responses[m.id]),
+            "maybe": sum((r.status == "maybe" for r in responses[m.id])),
+            "out": sum((r.status == "out" for r in responses[m.id])),
             "my_rsvp": next((r.status for r in responses[m.id] if r.player_id == player_id), None),
         }
         for m in matches

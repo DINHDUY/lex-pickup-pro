@@ -15,10 +15,12 @@ from sqlalchemy.engine import make_url  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from app.db import Base, get_db  # noqa: E402
+from app.db import Base  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models import Match, Player, Season, Team, User  # noqa: E402
 from app.security import _attempts, password_hasher  # noqa: E402
+from app.storage.factory import get_store  # noqa: E402
+from app.storage.sql import SqlStore  # noqa: E402
 
 PASSWORD = "TestPassword2026!"
 HASH = password_hasher.hash(PASSWORD)
@@ -98,11 +100,7 @@ def session_factory():
 
 @pytest.fixture
 def client(session_factory):
-    def override():
-        with session_factory() as db:
-            yield db
-
-    app.dependency_overrides[get_db] = override
+    app.dependency_overrides[get_store] = lambda: SqlStore(session_factory)
     _attempts.clear()
     with TestClient(app) as client:
         yield client

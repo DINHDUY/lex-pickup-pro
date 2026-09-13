@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -184,3 +185,27 @@ class ClubNote(Base):
     body: Mapped[str] = mapped_column(Text)
     category: Mapped[str] = mapped_column(String(20), default="general")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class StorageState(Base):
+    __tablename__ = "storage_state"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    counters: Mapped[dict] = mapped_column(JSON, default=dict)
+    mode: Mapped[str] = mapped_column(String(20), default="ready")
+
+
+class CommandReceipt(Base):
+    __tablename__ = "command_receipts"
+    command_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    result: Mapped[dict | list | str | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ReminderDispatch(Base):
+    __tablename__ = "reminder_dispatches"
+    dispatch_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    match_id: Mapped[int] = mapped_column(ForeignKey("matches.id"))
+    owner: Mapped[str] = mapped_column(String(36))
+    lease_until: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

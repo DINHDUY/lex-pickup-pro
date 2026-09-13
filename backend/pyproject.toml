@@ -15,6 +15,9 @@ dependencies = [
   "psycopg[binary]>=3.2,<4",
   "httpx>=0.28,<1",
   "tzdata>=2025.2",
+  "azure-cosmos>=4.9,<5",
+  "azure-identity>=1.20,<2",
+  "cryptography>=44,<51",
 ]
 
 [dependency-groups]

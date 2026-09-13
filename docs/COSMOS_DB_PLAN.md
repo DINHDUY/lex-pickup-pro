@@ -1,6 +1,6 @@
 # Plan: optional Azure Cosmos DB deployment
 
-Status: design only. The existing PostgreSQL deployments, imported roster, environment files and application code are unchanged.
+Status: provider implementation completed locally. See [COSMOS_DB.md](COSMOS_DB.md) for setup, migration, validation and remaining Azure rollout checks. Existing PostgreSQL deployments and the real imported roster have not been migrated. The sections below retain the design and acceptance criteria.
 
 ## Recommendation and scope
 
@@ -113,7 +113,7 @@ For the initial Cosmos release, an oversized **live** import fails before making
 
 ## Configuration and deployment
 
-Proposed settings, not implemented environment variables:
+Implemented provider settings:
 
 ```dotenv
 DATABASE_PROVIDER=cosmos
@@ -169,7 +169,7 @@ Run shared API/service tests against SQL and Cosmos, plus adapter-specific integ
 - Queries paginate correctly; Azure enforces the intended unique/index policies; representative workloads meet agreed latency/RU budgets.
 - Upgrade, backup restore and migration rollback preserve the roster, identities, accounts and match history.
 
-No Azure resources or production migration are created as part of this planning task. Region, account mode, deployment host and operational budgets are rollout inputs, not blockers to preparing the provider implementation.
+No Azure resources or production migration were created during local implementation. Region, account mode, deployment host and operational budgets are rollout inputs, not blockers to preparing the provider implementation.
 
 ## References
 

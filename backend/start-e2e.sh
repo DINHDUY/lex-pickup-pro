@@ -9,6 +9,7 @@ cleanup() {
     rm -rf "$test_dir"
 }
 trap cleanup EXIT INT TERM
+export DATABASE_PROVIDER=sql
 export DATABASE_URL="sqlite:///$test_dir/club.db"
 export APP_ENV=test DEMO_ENABLED=true COOKIE_SECURE=false
 export FRONTEND_URL=http://127.0.0.1:5187

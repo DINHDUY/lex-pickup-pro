@@ -23,6 +23,16 @@ React 19 · TypeScript · Vite · Tailwind CSS 4 · Radix UI · TanStack Query �
 
 The system design and entity relationships are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Deployment and operation details are in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
+## Optional Cosmos DB
+
+Azure Cosmos DB for NoSQL is supported alongside the default SQL provider. See [the Cosmos deployment and migration guide](docs/COSMOS_DB.md) for Azure identity, Bicep, emulator setup, atomic imports, and reversible data transfer.
+
+```bash
+docker compose -p lex-cosmos -f compose.cosmos.local.yaml up --build -d
+```
+
+This separate Cosmos demo opens at **http://localhost:8082** and preserves the SQL demo and real-club volumes. Real Azure rollout requires the cloud acceptance checks in the guide.
+
 ## Quick start: Docker demo
 
 For the real Messenger roster, use the [player import guide](docs/PLAYER_IMPORT.md). It covers the separate real-club Docker stack at port 8081, reviewed and repeatable imports, unknown profile fields, primary team assignments, administrator bootstrap and invitations. The demo database stays separate.
@@ -170,13 +180,16 @@ npm run test:e2e
 
 Browser tests start their own disposable SQLite database and servers on ports **8017** and **5187**. They exercise desktop and mobile workflows, including accessibility checks, and remove the temporary database afterward. They do not use your regular development database. `E2E_BASE_URL` can point tests at an explicitly disposable running deployment instead; tests create and modify records there.
 
-CI includes a PostgreSQL migration/seed/API smoke job. The production frontend is written to `frontend/dist`; `npm run preview` serves it for local inspection. PWA installation and service-worker caching are enabled in production builds, not the Vite development server. `npm run format` formats the frontend; `uv run ruff format app tests alembic` formats Python.
+CI runs backend tests, frontend lint/build, browser tests, and publishes container images to GHCR. The production frontend is written to `frontend/dist`; `npm run preview` serves it for local inspection. PWA installation and service-worker caching are enabled in production builds, not the Vite development server. `npm run format` formats the frontend; `uv run ruff format app tests alembic` formats Python.
 
 ## Project structure
 
 ```text
 backend/
-  app/               # Configuration, models, schemas, security, API, stats, seed and reminder CLIs
+  app/               # API, shared analytics, schemas, auth and operational CLIs
+    domain/          # Provider-independent records and club validation
+    storage/         # SQL/Cosmos adapters, command receipts and provider selection
+    migrate_storage.py # Offline verified exports, resumable imports and reverse recovery
   alembic/versions/  # Versioned, reversible database migrations
   tests/             # API, authorization, business rules and reminder tests
   pyproject.toml      # Python dependencies; uv.lock pins resolved versions
@@ -199,6 +212,6 @@ compose.yaml
 
 ## Scope and operational notes
 
-This application contains working local and deployment source; production readiness also depends on your hosting configuration and operational checks. Run PostgreSQL, HTTPS, backups, and the supplied CI checks before opening a real club. Configuration rejects the default signing secret, insecure cookies, demo mode, and default invitation code in production.
+This application contains working local and deployment source; production readiness also depends on your hosting configuration and operational checks. Configure PostgreSQL or the optional Cosmos provider, HTTPS, backups, and the supplied acceptance checks before opening a real club. Configuration rejects the default signing secret, insecure cookies, demo mode, and default invitation code in production.
 
 Photos use HTTPS URLs rather than file uploads. PDF export uses the browser’s print dialog. There is no payment collection, financial ledger, automatic email service, social login, or Messenger bot. Password recovery is administrator-assisted through the documented CLI. Static PWA assets are cached; authenticated API data is not cached by the service worker, and offline edits are not queued. A shared rate limiter is required before running multiple API workers.

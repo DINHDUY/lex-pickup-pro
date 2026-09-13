@@ -12,6 +12,7 @@ __pycache__/
 .env.*
 !.env.example
 !.env.real.example
+!.env.cosmos.example
 coverage/
 playwright-report/
 test-results/

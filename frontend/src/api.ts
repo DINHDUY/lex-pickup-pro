@@ -38,8 +38,30 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   return response.status === 204 ? (undefined as T) : response.json()
 }
 export function send<T>(path: string, data?: unknown, method = 'POST') {
-  return api<T>(path, { method, ...(data === undefined ? {} : { body: JSON.stringify(data) }) })
+  const body = data === undefined ? undefined : JSON.stringify(data)
+  const identity = JSON.stringify([method, path, body])
+  const existing = pendingCommands.get(identity)
+  if (!existing && pendingCommands.size >= 100) {
+    return Promise.reject(
+      new ApiError('Several changes are awaiting confirmation. Reconnect and retry them.', 0),
+    )
+  }
+  const key = existing ?? crypto.randomUUID()
+  pendingCommands.set(identity, key)
+  return api<T>(path, { method, body, headers: { 'Idempotency-Key': key } })
+    .then((result) => {
+      pendingCommands.delete(identity)
+      return result
+    })
+    .catch((error: unknown) => {
+      // Keep the key after an ambiguous network/server failure so a retry cannot duplicate a goal.
+      if (error instanceof ApiError && error.status >= 400 && error.status < 500) {
+        pendingCommands.delete(identity)
+      }
+      throw error
+    })
 }
+const pendingCommands = new Map<string, string>()
 export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {

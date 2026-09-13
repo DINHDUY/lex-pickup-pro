@@ -1,5 +1,7 @@
 # Deployment and club operations
 
+For optional Azure Cosmos DB deployment, emulator development and provider migration, see [COSMOS_DB.md](COSMOS_DB.md). The SQL deployment remains the default.
+
 ## Supported topology
 
 Place an HTTPS reverse proxy in front of the frontend container. nginx serves the compiled app and forwards `/api/` to FastAPI over a private Docker network. PostgreSQL is also private. The Compose file publishes only the web port.
@@ -7,7 +9,7 @@ Place an HTTPS reverse proxy in front of the frontend container. nginx serves th
 1. Copy `.env.example` to `.env` at the repository root.
 2. Use a **fresh PostgreSQL database**, not a demo database.
 3. Set the values below for your hostname.
-4. Build with `docker compose up --build -d`.
+4. Build with `docker compose up --build -d`, or pull the CI-published images from GitHub Container Registry (see below).
 5. Terminate TLS at your reverse proxy and forward to the published web port.
 6. Create the first administrator interactively.
 
@@ -26,6 +28,29 @@ DEMO_ENABLED=false
 
 Generate separate secrets with `openssl rand -hex 32`. Hex passwords work in the composed database URL without additional URL encoding. Do not commit `.env`. Prefer a secrets manager in managed deployments. A proxy on a public host should bind or firewall the upstream web port appropriately; only the HTTPS entry point should be exposed to members.
 
+## GitHub Container Registry images
+
+Club checks runs lint, unit tests, migrations, frontend build, and browser tests, then builds the backend and frontend images on every push and pull request. Images are published to GHCR only from the repository default branch and from version tags matching `v*`.
+
+Image names follow the repository path (lowercased):
+
+```text
+ghcr.io/<owner>/<repository>/backend
+ghcr.io/<owner>/<repository>/frontend
+```
+
+Default-branch builds receive `latest` plus a `sha-<short>` tag. Version tags such as `v0.1.0` also receive SemVer tags (`0.1.0`, `0.1`). Pull requests build both Dockerfiles without pushing.
+
+Authenticate with a GitHub token that can read packages, then pull:
+
+```bash
+echo "$GITHUB_TOKEN" | docker login ghcr.io -u USERNAME --password-stdin
+docker pull ghcr.io/<owner>/<repository>/backend:latest
+docker pull ghcr.io/<owner>/<repository>/frontend:latest
+```
+
+The first successful publish creates the packages. For a public repository, set each package visibility to public in GitHub Packages if anonymous pulls are required. Organization Actions settings must allow `GITHUB_TOKEN` to write packages. Local Compose still builds from `./backend` and `./frontend`; GHCR is the CI distribution path.
+
 Create an administrator after the service is healthy:
 
 ```bash
@@ -43,7 +68,7 @@ This prompts for a display name and password; no password is passed on the comma
 - Every authenticated request checks current account activity and session version. Signing out revokes the account’s previous sessions. Password resets and privilege changes also revoke them.
 - Player/captain/admin permissions are enforced on the backend, not just hidden in the UI.
 - Login and registration are limited to 20 attempts per IP per 10 minutes in one process. Use a shared edge limiter for multiple workers. Only trust forwarded client-IP headers from your controlled proxy network.
-- Invitation tokens are random, stored only as SHA-256 hashes, expire after 7 days, bind to one email/profile, and are single use. Share them privately; avoid collecting full query strings in frontend access analytics.
+- Invitation tokens are random, stored as SHA-256 hashes in invitation records (retry receipts encrypt returned links), expire after 7 days, bind to one email/profile, and are single use. Share them privately; avoid collecting full query strings in frontend access analytics.
 
 The nginx configuration includes a content security policy, frame blocking, MIME sniffing protection, a referrer policy, and a restricted permissions policy. Authentication responses and API data use `Cache-Control: no-store`. Frontend fonts are bundled and served locally.
 
@@ -65,7 +90,7 @@ uv run alembic upgrade head
 uv run alembic check
 ```
 
-PostgreSQL uses row locks for RSVP admission and match mutations. SQLite serializes local write requests with `BEGIN IMMEDIATE`; it is intended for local use or small single-instance demos. Never put a SQLite file on a shared network filesystem for multiple workers.
+PostgreSQL serializes atomic club commands with a transaction-level advisory lock, covering RSVP admission, match mutations, identity claims and counter allocation. SQLite serializes local write requests with `BEGIN IMMEDIATE`; it is intended for local use or small single-instance demos. Never put a SQLite file on a shared network filesystem for multiple workers.
 
 Primary teams have stable IDs: 1 = Old Gentlemen, 2 = Young Boys. Lineups hold match-side assignments independently. Deactivating a player preserves their historical appearances and event attribution. Before deactivating a member, captains should remove them from upcoming lineups and have them change any outstanding Going responses.
 
@@ -104,7 +129,7 @@ Run hourly from your scheduler (adjust the directory):
 0 * * * * cd /srv/lex-pickup-pro && docker compose exec -T backend python -m app.reminders --deliver >> /var/log/lex-reminders.log 2>&1
 ```
 
-Without `--deliver`, the command prints forwardable text only. It finds scheduled games starting in the next 24 hours. Successful deliveries set `reminder_sent_at`; editing a scheduled game clears that marker so an updated reminder can be sent. Failed deliveries exit nonzero for scheduler monitoring. Run only one reminder job at a time in SQLite.
+Without `--deliver`, the command prints forwardable text only. It finds scheduled games starting in the next 24 hours. Successful deliveries set `reminder_sent_at`; editing a scheduled game clears that marker so an updated reminder can be sent. Failed deliveries exit nonzero for scheduler monitoring. A conditional five-minute lease prevents overlapping workers from sending the same dispatch concurrently; the receiver must still deduplicate retries after a crash.
 
 Webhook example:
 
@@ -136,7 +161,7 @@ The service worker never caches `/api` responses or queues mutations. Offline us
 ## Deployment verification
 
 - `/api/v1/health` must return `{"status":"ok"}` and database connectivity must work.
-- Verify all supplied tests and the PostgreSQL CI job against the committed lockfiles.
+- Verify all supplied tests against the committed lockfiles.
 - Sign in as a real player and captain. Confirm permissions, RSVP persistence, lineups, scoring, and sharing on a phone.
 - Check that production cookies are Secure/HttpOnly and the site is served over HTTPS.
 - Test backup restoration and the reminder receiver if automatic delivery is enabled.

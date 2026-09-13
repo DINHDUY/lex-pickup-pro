@@ -60,6 +60,102 @@ def test_authentication_cookie_and_logout(client):
     assert client.get(f"{API}/auth/me").status_code == 401
 
 
+def test_public_config_reports_facebook_auth_toggle(client):
+    config = client.get(f"{API}/config").json()
+    assert "facebook_auth_enabled" in config
+    assert config["facebook_auth_enabled"] is False
+
+
+def test_facebook_callback_creates_user_for_valid_oauth_flow(client, session_factory, monkeypatch):
+    monkeypatch.setattr("app.main.settings.facebook_auth_enabled", True, raising=False)
+    monkeypatch.setattr("app.main.settings.facebook_app_id", "app-123", raising=False)
+    monkeypatch.setattr("app.main.settings.facebook_app_secret", "secret-123", raising=False)
+    monkeypatch.setattr(
+        "app.main.settings.facebook_redirect_uri", "https://club.example.com/login", raising=False
+    )
+    monkeypatch.setattr("app.main.settings.registration_enabled", True, raising=False)
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+            self.status_code = 200
+
+        def json(self):
+            return self._payload
+
+    def fake_post(url, data=None, timeout=None):
+        assert "oauth/access_token" in str(url)
+        return FakeResponse({"access_token": "test-access-token"})
+
+    def fake_get(url, params=None, timeout=None):
+        assert "graph.facebook.com" in str(url)
+        assert params["fields"] == "id,email,name"
+        return FakeResponse({"id": "fb-user-123", "email": "facebook@example.com", "name": "Facebook User"})
+
+    monkeypatch.setattr("app.main.httpx.post", fake_post, raising=False)
+    monkeypatch.setattr("app.main.httpx.get", fake_get, raising=False)
+
+    response = client.get(
+        f"{API}/auth/facebook/callback?code=test-code&state=test-state",
+        follow_redirects=False,
+        cookies={"facebook_oauth_state": "test-state"},
+    )
+    assert response.status_code == 302
+    assert response.headers["location"].endswith("/")
+    assert client.get(f"{API}/auth/me").json()["email"] == "facebook@example.com"
+
+
+def test_facebook_callback_requires_registration_gate_when_closed(client, monkeypatch):
+    monkeypatch.setattr("app.main.settings.facebook_auth_enabled", True, raising=False)
+    monkeypatch.setattr("app.main.settings.facebook_app_id", "app-123", raising=False)
+    monkeypatch.setattr("app.main.settings.facebook_app_secret", "secret-123", raising=False)
+    monkeypatch.setattr(
+        "app.main.settings.facebook_redirect_uri", "https://club.example.com/login", raising=False
+    )
+    monkeypatch.setattr("app.main.settings.registration_enabled", False, raising=False)
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+            self.status_code = 200
+
+        def json(self):
+            return self._payload
+
+    def fake_post(url, data=None, timeout=None):
+        return FakeResponse({"access_token": "test-access-token"})
+
+    def fake_get(url, params=None, timeout=None):
+        return FakeResponse({"id": "fb-user-456", "email": "restricted@example.com", "name": "Blocked User"})
+
+    monkeypatch.setattr("app.main.httpx.post", fake_post, raising=False)
+    monkeypatch.setattr("app.main.httpx.get", fake_get, raising=False)
+
+    response = client.get(
+        f"{API}/auth/facebook/callback?code=test-code&state=blocked",
+        follow_redirects=False,
+        cookies={"facebook_oauth_state": "blocked"},
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Registration is closed. Contact a captain."
+
+
+def test_facebook_auth_requires_secure_production_configuration():
+    with pytest.raises(ValueError, match="Facebook"):
+        Settings(
+            app_env="production",
+            jwt_secret="this-is-a-valid-prod-secret-1234",
+            cookie_secure=True,
+            frontend_url="https://club.example.com",
+            registration_enabled=False,
+            club_invite_code="CLUB-READY",
+            facebook_auth_enabled=True,
+            facebook_app_id="1234567890",
+            facebook_app_secret="super-secret",
+            facebook_redirect_uri="http://localhost:5173/api/v1/auth/facebook/callback",
+        )
+
+
 def test_logout_revokes_previously_issued_token(admin):
     token = admin.cookies.get(COOKIE)
     assert admin.post(f"{API}/auth/logout").status_code == 204
@@ -450,7 +546,9 @@ def test_reminder_delivery_is_signed_and_deduplicated(session_factory, monkeypat
     config = Settings(
         reminder_webhook_url="https://hooks.example/club", reminder_webhook_secret="webhook-secret"
     )
-    monkeypatch.setattr(reminders, "SessionLocal", session_factory)
+    from app.storage.sql import SqlStore
+
+    monkeypatch.setattr(reminders, "get_store", lambda: SqlStore(session_factory))
     monkeypatch.setattr(reminders, "get_settings", lambda: config)
     with session_factory() as db:
         db.get(Match, 1).starts_at = datetime.now(timezone.utc) + timedelta(hours=4)

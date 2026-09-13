@@ -106,4 +106,8 @@ Use the same target database for preview, explicit ID matching, and apply. IDs a
 
 ## Verification
 
-`uv run pytest -q` exercises malformed sources, review enforcement, Unicode, duplicate/renamed identities, idempotency, rollback, permissions, invitation claims, unknown profiles, balancing and exports. CI also runs the tests against a disposable PostgreSQL database via `LEX_TEST_DATABASE_URL` (database name must begin `lex_test_`). These tests own and remove their fixture tables; never point them at club data. Browser coverage verifies profile editing, filters, captain assignments and lineups on desktop and mobile.
+`uv run pytest -q` exercises malformed sources, review enforcement, Unicode, duplicate/renamed identities, idempotency, rollback, permissions, invitation claims, unknown profiles, balancing and exports. To run the same suite against a disposable PostgreSQL database, set `LEX_TEST_DATABASE_URL` (database name must begin `lex_test_`). These tests own and remove their fixture tables; never point them at club data. Browser coverage verifies profile editing, filters, captain assignments and lineups on desktop and mobile.
+
+## Optional Cosmos provider
+
+The reviewed manifest workflow also works with `DATABASE_PROVIDER=cosmos`; follow [COSMOS_DB.md](COSMOS_DB.md) to initialize the target first. The current 54-player roster fits one atomic batch because provenance is embedded in each player. A larger live import exceeding 100 operations or the safe request-size budget fails before writing; it is never silently split. SQL retains the larger-file behavior. To transfer already imported players, use the offline migration CLI so IDs, profile edits and import UUIDs remain unchanged.

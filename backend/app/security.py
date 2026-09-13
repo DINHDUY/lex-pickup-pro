@@ -7,15 +7,15 @@ from typing import Annotated
 import jwt
 from fastapi import Depends, HTTPException, Request, Response
 from pwdlib import PasswordHash
-from sqlalchemy.orm import Session
 
 from .config import get_settings
-from .db import get_db
-from .models import Player, User
+from .domain.club import ClubData
+from .domain.records import Player, User
+from .storage.factory import get_data
 
 password_hasher = PasswordHash.recommended()
 DUMMY_HASH = password_hasher.hash("constant-time-unknown-account-check")
-DB = Annotated[Session, Depends(get_db)]
+DB = Annotated[ClubData, Depends(get_data)]
 COOKIE = get_settings().session_cookie_name
 _attempts: dict[str, deque] = defaultdict(deque)
 _lock = Lock()

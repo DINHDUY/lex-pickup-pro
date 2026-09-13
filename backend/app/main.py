@@ -2,19 +2,34 @@ import csv
 import hashlib
 import io
 import secrets
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from typing import Annotated
+from urllib.parse import urlencode
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, FastAPI, HTTPException, Request, Response
+import httpx
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from sqlalchemy import delete, func, select, text
-from sqlalchemy.exc import IntegrityError
+from fastapi.responses import JSONResponse, RedirectResponse
+from starlette.concurrency import run_in_threadpool
 
 from . import schemas as S
 from .config import get_settings
-from .models import RSVP, ClubNote, Invitation, Lineup, Match, MatchEvent, Player, Rating, Season, Team, User
+from .domain.records import (
+    RSVP,
+    ClubNote,
+    Invitation,
+    Lineup,
+    Match,
+    MatchEvent,
+    Player,
+    Rating,
+    Season,
+    Team,
+    User,
+)
 from .security import (
     COOKIE,
     DB,
@@ -27,9 +42,34 @@ from .security import (
     throttle,
 )
 from .services import match_summaries, row_dict, statistics
+from .storage.commands import command
+from .storage.factory import get_store
+from .storage.interfaces import StorageConflict, StorageError, StorageLimit, Store
 
 settings = get_settings()
+
+
+@asynccontextmanager
+async def lifespan(app):
+    # Tests supply isolated stores. Normal workers own one client and verify it before serving traffic.
+    owned = get_store not in app.dependency_overrides
+    store = None
+    try:
+        if owned:
+            store = await run_in_threadpool(get_store)
+            if hasattr(store, "check_configuration"):
+                await run_in_threadpool(store.check_configuration)
+                await run_in_threadpool(store.read)
+            await run_in_threadpool(store.health)
+        yield
+    finally:
+        if owned and store:
+            await run_in_threadpool(store.close)
+            get_store.cache_clear()
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="Lex Pickup Pro",
     version="1.0.0",
     docs_url="/api/docs",
@@ -41,7 +81,7 @@ app.add_middleware(
     allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-    allow_headers=["Content-Type"],
+    allow_headers=["Content-Type", "Idempotency-Key"],
 )
 api = APIRouter(prefix="/api/v1")
 
@@ -52,7 +92,7 @@ async def security_headers(request: Request, call_next):
     if request.method not in ("GET", "HEAD", "OPTIONS"):
         if origin and origin.rstrip("/") not in {o.rstrip("/") for o in settings.cors_origins}:
             return JSONResponse({"detail": "Request origin is not allowed"}, status_code=403)
-        if request.headers.get("sec-fetch-site") == "cross-site" and not origin:
+        if request.headers.get("sec-fetch-site") == "cross-site" and (not origin):
             return JSONResponse({"detail": "Cross-site request is not allowed"}, status_code=403)
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
@@ -64,10 +104,24 @@ async def security_headers(request: Request, call_next):
     return response
 
 
-@app.exception_handler(IntegrityError)
+@app.exception_handler(StorageConflict)
 async def conflict_handler(request, exc):
     return JSONResponse(
         {"detail": "This record changed or already exists. Refresh and try again."}, status_code=409
+    )
+
+
+@app.exception_handler(StorageLimit)
+async def limit_handler(request, exc):
+    return JSONResponse({"detail": str(exc)}, status_code=413)
+
+
+@app.exception_handler(StorageError)
+async def storage_handler(request, exc):
+    return JSONResponse(
+        {"detail": "Club data is temporarily unavailable. Please try this action again."},
+        status_code=503,
+        headers={"Retry-After": "2"},
     )
 
 
@@ -79,7 +133,7 @@ def require(db, model, record_id):
 
 
 def locked_match(db, match_id):
-    match = db.scalar(select(Match).where(Match.id == match_id).with_for_update())
+    match = db.first(Match, id=match_id)
     if not match:
         raise HTTPException(404, "Match not found")
     return match
@@ -95,46 +149,192 @@ def user_payload(user, db):
 
 
 @api.get("/health")
-def health(db: DB):
-    db.execute(text("SELECT 1"))
+def health(store: Annotated[Store, Depends(get_store)]):
+    store.health()
     return {"status": "ok"}
 
 
 @api.get("/config")
 def public_config():
-    return {"demo_enabled": settings.demo_enabled, "registration_enabled": settings.registration_enabled}
+    return {
+        "demo_enabled": settings.demo_enabled,
+        "registration_enabled": settings.registration_enabled,
+        "facebook_auth_enabled": settings.facebook_auth_enabled,
+    }
+
+
+@api.get("/auth/facebook/login")
+def facebook_login(request: Request):
+    if not settings.facebook_auth_enabled:
+        raise HTTPException(403, "Facebook authentication is disabled")
+    if (
+        not settings.facebook_app_id
+        or not settings.facebook_app_secret
+        or (not settings.facebook_redirect_uri)
+    ):
+        raise HTTPException(503, "Facebook authentication is not configured")
+    invite_token = request.query_params.get("invite") or ""
+    state = secrets.token_urlsafe(32)
+    redirect = RedirectResponse(
+        f"https://www.facebook.com/v20.0/dialog/oauth?{urlencode({'client_id': settings.facebook_app_id, 'redirect_uri': settings.facebook_redirect_uri, 'scope': 'email,public_profile', 'response_type': 'code', 'state': state})}",
+        status_code=302,
+    )
+    redirect.set_cookie(
+        "facebook_oauth_state",
+        state,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite="lax",
+        path="/api",
+    )
+    if invite_token:
+        redirect.set_cookie(
+            "facebook_oauth_invite",
+            invite_token,
+            httponly=True,
+            secure=settings.cookie_secure,
+            samesite="lax",
+            path="/api",
+        )
+    else:
+        redirect.delete_cookie("facebook_oauth_invite", path="/api")
+    return redirect
+
+
+@api.get("/auth/facebook/callback")
+def facebook_callback(request: Request, db: DB):
+    if not settings.facebook_auth_enabled:
+        raise HTTPException(403, "Facebook authentication is disabled")
+    if (
+        not settings.facebook_app_id
+        or not settings.facebook_app_secret
+        or (not settings.facebook_redirect_uri)
+    ):
+        raise HTTPException(503, "Facebook authentication is not configured")
+    state = request.query_params.get("state")
+    stored_state = request.cookies.get("facebook_oauth_state")
+    if not state or not stored_state or (not secrets.compare_digest(state, stored_state)):
+        raise HTTPException(400, "Facebook sign-in was cancelled or tampered with")
+    invite_token = request.cookies.get("facebook_oauth_invite") or ""
+    code = request.query_params.get("code")
+    if not code:
+        raise HTTPException(400, "Facebook sign-in did not return an authorization code")
+    try:
+        token_response = httpx.post(
+            "https://graph.facebook.com/v20.0/oauth/access_token",
+            data={
+                "client_id": settings.facebook_app_id,
+                "client_secret": settings.facebook_app_secret,
+                "redirect_uri": settings.facebook_redirect_uri,
+                "code": code,
+            },
+            timeout=10,
+        )
+        if hasattr(token_response, "raise_for_status"):
+            token_response.raise_for_status()
+        access_token = token_response.json().get("access_token")
+    except (httpx.HTTPError, ValueError, AttributeError):
+        raise HTTPException(502, "Facebook sign-in failed while exchanging the authorization code") from None
+    if not access_token:
+        raise HTTPException(400, "Facebook did not return an access token")
+    try:
+        profile_response = httpx.get(
+            "https://graph.facebook.com/v20.0/me",
+            params={"fields": "id,email,name", "access_token": access_token},
+            timeout=10,
+        )
+        if hasattr(profile_response, "raise_for_status"):
+            profile_response.raise_for_status()
+        profile = profile_response.json()
+    except (httpx.HTTPError, ValueError, AttributeError):
+        raise HTTPException(502, "Facebook sign-in failed while fetching your profile") from None
+    facebook_id = str(profile.get("id") or "").strip()
+    email = (profile.get("email") or "").strip().lower()
+    if not facebook_id or not email:
+        raise HTTPException(400, "Facebook profile did not include the required email address")
+
+    def finish(db):
+        user = db.first(User, email=email)
+        if user:
+            if not db.get(Player, user.player_id).active:
+                raise HTTPException(401, "Account is unavailable")
+            return user.id
+        if not settings.registration_enabled and (not invite_token):
+            raise HTTPException(403, "Registration is closed. Contact a captain.")
+        if invite_token:
+            invitation = next(
+                iter(
+                    [
+                        row
+                        for row in db.records(Invitation)
+                        if row.token_hash == hashlib.sha256(invite_token.encode()).hexdigest()
+                        and row.used is False
+                        and (row.expires_at > datetime.now(timezone.utc))
+                    ]
+                ),
+                None,
+            )
+            if not invitation or invitation.email != email:
+                raise HTTPException(403, "Invitation is invalid, expired, or for a different email address")
+            player = require(db, Player, invitation.player_id)
+            if not player.active or db.first(User, player_id=player.id):
+                raise HTTPException(409, "This profile cannot be claimed. Contact your administrator.")
+            invitation.used = True
+        else:
+            player = Player(name=profile.get("name") or "Facebook User", team_id=None)
+            db.insert(player)
+        if db.first(User, email=email):
+            raise HTTPException(409, "Unable to register this email. Try signing in.")
+        user = User(
+            email=email, password_hash=password_hasher.hash(secrets.token_urlsafe(32)), player_id=player.id
+        )
+        db.insert(user)
+        return user.id
+
+    user_id = db.store.execute(finish)
+    current = db.store.read()
+    user = current.get(User, user_id)
+    if not user or not current.get(Player, user.player_id).active:
+        raise HTTPException(401, "Account is unavailable")
+    redirect = RedirectResponse(f"{settings.frontend_url}/", status_code=302)
+    redirect.delete_cookie("facebook_oauth_state", path="/api")
+    redirect.delete_cookie("facebook_oauth_invite", path="/api")
+    set_session(redirect, user)
+    return redirect
 
 
 @api.post("/auth/login")
 def login(data: S.Login, request: Request, response: Response, db: DB):
     throttle(request)
-    user = db.scalar(select(User).where(User.email == data.email.lower()))
+    user = db.first(User, email=data.email.lower())
     verified = password_hasher.verify(data.password, user.password_hash if user else DUMMY_HASH)
-    if not user or not verified or not db.get(Player, user.player_id).active:
+    if not user or not verified or (not db.get(Player, user.player_id).active):
         raise HTTPException(401, "Email or password is incorrect")
     set_session(response, user)
     return user_payload(user, db)
 
 
-@api.post("/auth/register", status_code=201)
-def register(data: S.Register, request: Request, response: Response, db: DB):
-    throttle(request)
-    if not settings.registration_enabled and not data.invite_token:
+@command
+def register_account(data: S.Register, request: Request, response: Response, db: DB):
+    if not settings.registration_enabled and (not data.invite_token):
         raise HTTPException(403, "Registration is closed. Contact a captain.")
     if data.invite_token:
-        invitation = db.scalar(
-            select(Invitation)
-            .where(
-                Invitation.token_hash == hashlib.sha256(data.invite_token.encode()).hexdigest(),
-                Invitation.used.is_(False),
-                Invitation.expires_at > datetime.now(timezone.utc),
-            )
-            .with_for_update()
+        invitation = next(
+            iter(
+                [
+                    row
+                    for row in db.records(Invitation)
+                    if row.token_hash == hashlib.sha256(data.invite_token.encode()).hexdigest()
+                    and row.used is False
+                    and (row.expires_at > datetime.now(timezone.utc))
+                ]
+            ),
+            None,
         )
         if not invitation or invitation.email != data.email.lower():
             raise HTTPException(403, "Invitation is invalid, expired, or for a different email address")
         player = require(db, Player, invitation.player_id)
-        if not player.active or db.scalar(select(User).where(User.player_id == player.id)):
+        if not player.active or db.first(User, player_id=player.id):
             raise HTTPException(409, "This profile cannot be claimed. Contact your administrator.")
         invitation.used = True
     else:
@@ -143,23 +343,36 @@ def register(data: S.Register, request: Request, response: Response, db: DB):
         if data.team_id is not None:
             require(db, Team, data.team_id)
         player = Player(name=data.name, team_id=data.team_id)
-        db.add(player)
-    if db.scalar(select(User).where(User.email == data.email.lower())):
+        db.insert(player)
+    if db.first(User, email=data.email.lower()):
         raise HTTPException(409, "Unable to register this email. Try signing in.")
-    db.flush()
     user = User(
         email=data.email.lower(), password_hash=password_hasher.hash(data.password), player_id=player.id
     )
-    db.add(user)
-    db.commit()
-    set_session(response, user)
+    db.insert(user)
     return user_payload(user, db)
 
 
+@api.post("/auth/register", status_code=201)
+def register(data: S.Register, request: Request, response: Response, db: DB):
+    throttle(request)
+    result = register_account(data=data, request=request, response=response, db=db)
+    current = db.store.read()
+    user = current.get(User, result["id"])
+    if (
+        not user
+        or not current.get(Player, user.player_id).active
+        or not password_hasher.verify(data.password, user.password_hash)
+    ):
+        raise HTTPException(401, "Account is unavailable")
+    set_session(response, user)
+    return user_payload(user, current)
+
+
 @api.post("/auth/logout", status_code=204)
+@command
 def logout(response: Response, user: CurrentUser, db: DB):
     user.session_version += 1
-    db.commit()
     response.delete_cookie(COOKIE, path="/api", httponly=True, secure=settings.cookie_secure, samesite="lax")
 
 
@@ -170,81 +383,81 @@ def me(user: CurrentUser, db: DB):
 
 @api.get("/teams")
 def teams(user: CurrentUser, db: DB):
-    return [row_dict(t) for t in db.scalars(select(Team).order_by(Team.id))]
+    return [row_dict(t) for t in sorted(db.records(Team), key=lambda row: row.id, reverse=False)]
 
 
 @api.get("/seasons")
 def seasons(user: CurrentUser, db: DB):
-    return [row_dict(s) for s in db.scalars(select(Season).order_by(Season.id.desc()))]
+    return [row_dict(s) for s in sorted(db.records(Season), key=lambda row: row.id, reverse=True)]
 
 
 @api.get("/players")
 def players(user: CurrentUser, db: DB):
     return [
-        row_dict(p) for p in db.scalars(select(Player).where(Player.active.is_(True)).order_by(Player.name))
+        row_dict(p)
+        for p in sorted(
+            [row for row in db.records(Player) if row.active is True], key=lambda row: row.name, reverse=False
+        )
     ]
 
 
 @api.post("/seasons", status_code=201)
+@command
 def create_season(data: S.SeasonInput, user: Admin, db: DB):
-    for old in db.scalars(select(Season).where(Season.active.is_(True))):
+    for old in [row for row in db.records(Season) if row.active is True]:
         old.active = False
     season = Season(name=data.name, active=True)
-    db.add(season)
-    db.commit()
+    db.insert(season)
     return row_dict(season)
 
 
 @api.post("/players", status_code=201)
+@command
 def create_player(data: S.PlayerCreate, user: Admin, db: DB):
     if data.team_id is not None:
         require(db, Team, data.team_id)
     p = Player(**data.model_dump())
-    db.add(p)
-    db.commit()
+    db.insert(p)
     return row_dict(p)
 
 
 @api.get("/players/{player_id}")
 def player_detail(player_id: int, user: CurrentUser, db: DB):
     p = require(db, Player, player_id)
-    stats = next(s for s in statistics(db)["players"] if s["player_id"] == player_id)
-    ids = select(Lineup.match_id).where(Lineup.player_id == player_id)
-    matches = list(
-        db.scalars(
-            select(Match)
-            .where(Match.id.in_(ids), Match.status == "completed")
-            .order_by(Match.starts_at.desc())
-            .limit(10)
-        )
-    )
+    stats = next((s for s in statistics(db)["players"] if s["player_id"] == player_id))
+    ids = {r.match_id for r in db.records(Lineup, player_id=player_id)}
+    matches = sorted(
+        [m for m in db.records(Match, status="completed") if m.id in ids],
+        key=lambda m: m.starts_at,
+        reverse=True,
+    )[:10]
     return {**row_dict(p), "stats": stats, "matches": match_summaries(db, matches, user.player_id)}
 
 
 @api.put("/players/{player_id}")
+@command
 def update_player(player_id: int, data: S.PlayerFields, user: CurrentUser, db: DB):
     if user.player_id != player_id and user.role != "admin":
         raise HTTPException(403, "You can only edit your own profile")
     p = require(db, Player, player_id)
     for key, value in data.model_dump().items():
         setattr(p, key, value)
-    db.commit()
     return row_dict(p)
 
 
 @api.patch("/players/{player_id}/team")
+@command
 def assign_team(player_id: int, data: S.TeamAssignment, user: Captain, db: DB):
     player = require(db, Player, player_id)
     if data.team_id is not None:
         require(db, Team, data.team_id)
     player.team_id = data.team_id
-    db.commit()
     return row_dict(player)
 
 
 @api.get("/admin/members")
 def members(user: Admin, db: DB):
-    users = {u.player_id: u for u in db.scalars(select(User))}
+    users = {u.player_id: u for u in db.records(User)}
     return [
         {
             **row_dict(p),
@@ -252,20 +465,21 @@ def members(user: Admin, db: DB):
             "role": users[p.id].role if p.id in users else "player",
             "has_account": p.id in users,
         }
-        for p in db.scalars(select(Player).order_by(Player.name))
+        for p in sorted(db.records(Player), key=lambda row: row.name, reverse=False)
     ]
 
 
 @api.post("/admin/members/{player_id}/invite")
+@command
 def invite_member(player_id: int, data: S.InviteInput, user: Admin, db: DB):
     player = require(db, Player, player_id)
-    if not player.active or db.scalar(select(User).where(User.player_id == player_id)):
+    if not player.active or db.first(User, player_id=player_id):
         raise HTTPException(400, "Only active players without accounts can be invited")
-    if db.scalar(select(User).where(User.email == data.email.lower())):
+    if db.first(User, email=data.email.lower()):
         raise HTTPException(409, "This email already has a club account")
-    db.execute(delete(Invitation).where(Invitation.player_id == player_id))
+    db.remove_where(Invitation, player_id=player_id)
     token = secrets.token_urlsafe(32)
-    db.add(
+    db.insert(
         Invitation(
             player_id=player_id,
             email=data.email.lower(),
@@ -273,7 +487,6 @@ def invite_member(player_id: int, data: S.InviteInput, user: Admin, db: DB):
             expires_at=datetime.now(timezone.utc) + timedelta(days=7),
         )
     )
-    db.commit()
     return {
         "url": f"{settings.frontend_url}/login?invite={token}",
         "expires_in_days": 7,
@@ -283,34 +496,35 @@ def invite_member(player_id: int, data: S.InviteInput, user: Admin, db: DB):
 
 
 @api.patch("/admin/members/{player_id}")
+@command
 def update_member(player_id: int, data: S.MemberUpdate, user: Admin, db: DB):
     p = require(db, Player, player_id)
-    account = db.scalar(select(User).where(User.player_id == player_id))
+    account = db.first(User, player_id=player_id)
     if player_id == user.player_id and (data.role != "admin" or not data.active):
         raise HTTPException(400, "You cannot demote or deactivate your own administrator account")
     if not account and data.role != "player":
         raise HTTPException(400, "This player needs an account before assigning a role")
-    p.team_id, p.active, p.is_captain = data.team_id, data.active, data.role in ("captain", "admin")
+    p.team_id, p.active, p.is_captain = (data.team_id, data.active, data.role in ("captain", "admin"))
     if account:
         if account.role != data.role or not data.active:
             account.session_version += 1
         account.role = data.role
-    db.commit()
     return {"ok": True}
 
 
 @api.get("/matches")
 def matches(user: CurrentUser, db: DB):
     return match_summaries(
-        db, list(db.scalars(select(Match).order_by(Match.starts_at.desc()))), user.player_id
+        db, list(sorted(db.records(Match), key=lambda row: row.starts_at, reverse=True)), user.player_id
     )
 
 
 @api.post("/matches", status_code=201)
+@command
 def create_match(data: S.MatchCreate, user: Captain, db: DB):
     if data.starts_at < datetime.now(timezone.utc) - timedelta(minutes=5):
         raise HTTPException(400, "Schedule a game in the future")
-    season = db.scalar(select(Season).where(Season.active.is_(True)))
+    season = db.first(Season, active=True)
     if not season:
         raise HTTPException(400, "No active season. Run the database initialization command.")
     values = data.model_dump(exclude={"repeat_weeks", "starts_at"})
@@ -327,13 +541,13 @@ def create_match(data: S.MatchCreate, user: Captain, db: DB):
             created_by=user.id,
             formation=formations[data.capacity],
         )
-        db.add(m)
+        db.insert(m)
         created.append(m)
-    db.commit()
     return match_summaries(db, created, user.player_id)
 
 
 @api.put("/matches/{match_id}")
+@command
 def update_match(match_id: int, data: S.MatchCreate, user: Captain, db: DB):
     m = locked_match(db, match_id)
     if m.status != "scheduled":
@@ -343,11 +557,9 @@ def update_match(match_id: int, data: S.MatchCreate, user: Captain, db: DB):
     if data.repeat_weeks != 1:
         raise HTTPException(400, "Edit one game at a time; create a new series to repeat")
     if m.capacity != data.capacity:
-        if db.scalar(select(Lineup).where(Lineup.match_id == match_id).limit(1)):
+        if next(iter([row for row in db.records(Lineup) if row.match_id == match_id][:1]), None):
             raise HTTPException(400, "Clear the lineup before changing the game size")
-        going = db.scalar(
-            select(func.count()).select_from(RSVP).where(RSVP.match_id == match_id, RSVP.status == "going")
-        )
+        going = len([row for row in db.records(RSVP) if row.match_id == match_id and row.status == "going"])
         if going > data.capacity:
             raise HTTPException(400, "Capacity cannot be lower than the number of confirmed players")
         m.formation = {
@@ -362,7 +574,6 @@ def update_match(match_id: int, data: S.MatchCreate, user: Captain, db: DB):
     m.reminder_sent_at = None
     for key, value in data.model_dump(exclude={"repeat_weeks"}).items():
         setattr(m, key, value)
-    db.commit()
     return match_summaries(db, [m], user.player_id)
 
 
@@ -374,56 +585,56 @@ def match_detail(match_id: int, user: CurrentUser, db: DB):
         **summary,
         "players": [
             row_dict(p)
-            for p in db.scalars(
-                select(Player).where(
-                    Player.id.in_(select(Lineup.player_id).where(Lineup.match_id == match_id))
-                )
-            )
+            for p in [
+                row
+                for row in db.records(Player)
+                if row.id
+                in [row.player_id for row in [row for row in db.records(Lineup) if row.match_id == match_id]]
+            ]
         ],
-        "rsvps": [row_dict(r) for r in db.scalars(select(RSVP).where(RSVP.match_id == match_id))],
-        "lineup": [row_dict(r) for r in db.scalars(select(Lineup).where(Lineup.match_id == match_id))],
+        "rsvps": [row_dict(r) for r in [row for row in db.records(RSVP) if row.match_id == match_id]],
+        "lineup": [row_dict(r) for r in [row for row in db.records(Lineup) if row.match_id == match_id]],
         "events": [
             row_dict(r)
-            for r in db.scalars(
-                select(MatchEvent).where(MatchEvent.match_id == match_id).order_by(MatchEvent.minute)
+            for r in sorted(
+                [row for row in db.records(MatchEvent) if row.match_id == match_id],
+                key=lambda row: row.minute,
+                reverse=False,
             )
         ],
         "my_ratings": [
             row_dict(r)
-            for r in db.scalars(
-                select(Rating).where(Rating.match_id == match_id, Rating.author_id == user.id)
-            )
+            for r in [
+                row for row in db.records(Rating) if row.match_id == match_id and row.author_id == user.id
+            ]
         ],
     }
 
 
 @api.put("/matches/{match_id}/rsvp")
+@command
 def rsvp(match_id: int, data: S.RSVPInput, user: CurrentUser, db: DB):
-    # Serialize attendance admission on PostgreSQL. The uniqueness constraint handles duplicate submissions.
-    m = db.scalar(select(Match).where(Match.id == match_id).with_for_update())
+    m = db.first(Match, id=match_id)
     if not m:
         raise HTTPException(404, "Match not found")
     starts = m.starts_at.replace(tzinfo=timezone.utc) if m.starts_at.tzinfo is None else m.starts_at
     if m.status != "scheduled" or starts <= datetime.now(timezone.utc):
         raise HTTPException(400, "Availability is closed for this game")
-    existing = db.scalar(select(RSVP).where(RSVP.match_id == match_id, RSVP.player_id == user.player_id))
+    existing = db.first(RSVP, match_id=match_id, player_id=user.player_id)
     if data.status == "going" and (not existing or existing.status != "going"):
-        count = db.scalar(
-            select(func.count()).select_from(RSVP).where(RSVP.match_id == match_id, RSVP.status == "going")
-        )
+        count = len([row for row in db.records(RSVP) if row.match_id == match_id and row.status == "going"])
         if count >= m.capacity:
             raise HTTPException(409, "This game is full. Choose Maybe to join the reserve list.")
     if existing:
         existing.status = data.status
     else:
-        db.add(RSVP(match_id=match_id, player_id=user.player_id, status=data.status))
-    db.commit()
+        db.insert(RSVP(match_id=match_id, player_id=user.player_id, status=data.status))
     return {"status": data.status}
 
 
 def validate_scores(db, match_id, home, away):
     counts = {"home": 0, "away": 0}
-    for e in db.scalars(select(MatchEvent).where(MatchEvent.match_id == match_id)):
+    for e in [row for row in db.records(MatchEvent) if row.match_id == match_id]:
         if e.kind in ("goal", "own_goal"):
             counts[e.side] += 1
     if counts["home"] > home or counts["away"] > away:
@@ -433,22 +644,23 @@ def validate_scores(db, match_id, home, away):
 
 
 @api.patch("/matches/{match_id}/result")
+@command
 def result(match_id: int, data: S.ResultInput, user: Captain, db: DB):
     m = locked_match(db, match_id)
     validate_scores(db, match_id, data.home_score, data.away_score)
     if data.status == "completed":
-        sides = set(db.scalars(select(Lineup.side).where(Lineup.match_id == match_id)))
+        sides = set([row.side for row in [row for row in db.records(Lineup) if row.match_id == match_id]])
         if sides != {"home", "away"}:
             raise HTTPException(400, "Assign players to both sides before completing the game")
     if m.status == "completed" and data.status in ("scheduled", "live"):
         raise HTTPException(400, "Completed games can be corrected, but cannot be reopened")
     for key, value in data.model_dump().items():
         setattr(m, key, value)
-    db.commit()
     return row_dict(m)
 
 
 @api.put("/matches/{match_id}/lineup")
+@command
 def save_lineup(match_id: int, data: S.LineupInput, user: Captain, db: DB):
     m = locked_match(db, match_id)
     if m.status != "scheduled":
@@ -461,38 +673,38 @@ def save_lineup(match_id: int, data: S.LineupInput, user: Captain, db: DB):
     if (
         len(set(ids)) != len(ids)
         or len(set(slots)) != len(slots)
-        or any(p.slot >= size for p in data.players)
+        or any((p.slot >= size for p in data.players))
     ):
         raise HTTPException(400, "Each player and pitch position can only appear once")
-    active = set(db.scalars(select(Player.id).where(Player.active.is_(True), Player.id.in_(ids))))
+    active = set(
+        [row.id for row in [row for row in db.records(Player) if row.active is True and row.id in ids]]
+    )
     if set(ids) != active:
         raise HTTPException(400, "Lineup contains an unavailable player")
-    declined = set(db.scalars(select(RSVP.player_id).where(RSVP.match_id == match_id, RSVP.status == "out")))
+    declined = set(
+        [
+            row.player_id
+            for row in [row for row in db.records(RSVP) if row.match_id == match_id and row.status == "out"]
+        ]
+    )
     if set(ids) & declined:
         raise HTTPException(400, "A selected player is not going. Update availability first.")
-    db.execute(delete(Lineup).where(Lineup.match_id == match_id))
-    db.flush()
-    db.add_all([Lineup(match_id=match_id, **p.model_dump()) for p in data.players])
+    db.remove_where(Lineup, match_id=match_id)
+    db.insert_many([Lineup(match_id=match_id, **p.model_dump()) for p in data.players])
     m.formation = data.formation
-    db.commit()
     return {"ok": True}
 
 
 @api.post("/matches/{match_id}/balance")
+@command
 def balance(match_id: int, user: Captain, db: DB):
     m = locked_match(db, match_id)
     if m.status != "scheduled":
         raise HTTPException(400, "Only upcoming games can be balanced")
-    available = list(
-        db.scalars(
-            select(Player)
-            .join(RSVP, RSVP.player_id == Player.id)
-            .where(RSVP.match_id == match_id, RSVP.status == "going", Player.active.is_(True))
-        )
-    )
+    going_ids = {r.player_id for r in db.records(RSVP, match_id=match_id, status="going")}
+    available = [p for p in db.records(Player, active=True) if p.id in going_ids]
     if len(available) < 2:
         raise HTTPException(400, "At least two players must be Going to build teams")
-    # Greedy skill balancing with a goalkeeper on each side where available.
     available.sort(
         key=lambda p: (
             "GK" not in (p.positions or "").split(","),
@@ -500,19 +712,17 @@ def balance(match_id: int, user: Captain, db: DB):
             p.id,
         )
     )
-    squads, totals = {"home": [], "away": []}, {"home": 0.0, "away": 0.0}
+    squads, totals = ({"home": [], "away": []}, {"home": 0.0, "away": 0.0})
     for p in available[: m.capacity]:
         choices = [side for side in squads if len(squads[side]) < m.capacity // 2]
         side = min(choices, key=lambda s: (totals[s], len(squads[s]), s != "home"))
         squads[side].append(p)
         totals[side] += p.skill if p.skill is not None else 5.5
-    db.execute(delete(Lineup).where(Lineup.match_id == match_id))
-    db.flush()
+    db.remove_where(Lineup, match_id=match_id)
     for side, squad in squads.items():
         for slot, p in enumerate(squad):
-            db.add(Lineup(match_id=match_id, player_id=p.id, side=side, slot=slot))
+            db.insert(Lineup(match_id=match_id, player_id=p.id, side=side, slot=slot))
     m.kind = "mixed"
-    db.commit()
     return {
         "ok": True,
         "team_skill": totals,
@@ -522,11 +732,12 @@ def balance(match_id: int, user: Captain, db: DB):
 
 
 @api.post("/matches/{match_id}/events", status_code=201)
+@command
 def add_event(match_id: int, data: S.EventInput, user: Captain, db: DB):
     m = locked_match(db, match_id)
     if m.status not in ("live", "completed"):
         raise HTTPException(400, "Start the game or record a result before adding events")
-    lineup = {p.player_id: p for p in db.scalars(select(Lineup).where(Lineup.match_id == match_id))}
+    lineup = {p.player_id: p for p in [row for row in db.records(Lineup) if row.match_id == match_id]}
     if data.player_id not in lineup:
         raise HTTPException(400, "Select a player in this game's lineup")
     side = lineup[data.player_id].side
@@ -536,7 +747,7 @@ def add_event(match_id: int, data: S.EventInput, user: Captain, db: DB):
             data.kind != "goal"
             or not assist
             or assist.side != side
-            or data.assist_player_id == data.player_id
+            or (data.assist_player_id == data.player_id)
         ):
             raise HTTPException(400, "An assist must be a different teammate on a goal")
     if data.minute > m.duration_minutes:
@@ -544,17 +755,16 @@ def add_event(match_id: int, data: S.EventInput, user: Captain, db: DB):
     if data.kind == "own_goal":
         side = "away" if side == "home" else "home"
     e = MatchEvent(match_id=match_id, side=side, **data.model_dump())
-    db.add(e)
-    db.flush()
+    db.insert(e)
     if m.status == "live" and e.kind in ("goal", "own_goal"):
         setattr(m, f"{side}_score", getattr(m, f"{side}_score") + 1)
     else:
         validate_scores(db, match_id, m.home_score, m.away_score)
-    db.commit()
     return row_dict(e)
 
 
 @api.delete("/matches/{match_id}/events/{event_id}", status_code=204)
+@command
 def remove_event(match_id: int, event_id: int, user: Captain, db: DB):
     m = locked_match(db, match_id)
     e = require(db, MatchEvent, event_id)
@@ -562,37 +772,32 @@ def remove_event(match_id: int, event_id: int, user: Captain, db: DB):
         raise HTTPException(404, "Event not found in this game")
     if m.status == "live" and e.kind in ("goal", "own_goal"):
         setattr(m, f"{e.side}_score", max(0, getattr(m, f"{e.side}_score") - 1))
-    db.delete(e)
-    db.commit()
+    db.remove(e)
 
 
 @api.put("/matches/{match_id}/ratings")
+@command
 def rate(match_id: int, data: S.RatingInput, user: CurrentUser, db: DB):
     m = require(db, Match, match_id)
-    ids = set(db.scalars(select(Lineup.player_id).where(Lineup.match_id == match_id)))
+    ids = set([row.player_id for row in [row for row in db.records(Lineup) if row.match_id == match_id]])
     if m.status != "completed" or data.player_id not in ids:
         raise HTTPException(400, "Rate a player who participated in a completed game")
     if user.player_id not in ids and user.role not in ("captain", "admin"):
         raise HTTPException(403, "Only participants and organizers can rate this game")
     if data.player_id == user.player_id:
         raise HTTPException(400, "You cannot rate yourself")
-    existing = db.scalar(
-        select(Rating).where(
-            Rating.match_id == match_id, Rating.player_id == data.player_id, Rating.author_id == user.id
-        )
-    )
+    existing = db.first(Rating, match_id=match_id, player_id=data.player_id, author_id=user.id)
     if existing:
         existing.value = data.value
     else:
-        db.add(Rating(match_id=match_id, author_id=user.id, **data.model_dump()))
-    db.commit()
+        db.insert(Rating(match_id=match_id, author_id=user.id, **data.model_dump()))
     return {"ok": True}
 
 
 @api.get("/stats")
 def stats(user: CurrentUser, db: DB, season_id: int | None = None, active_season: bool = False):
     if active_season:
-        active = db.scalar(select(Season).where(Season.active.is_(True)))
+        active = db.first(Season, active=True)
         season_id = active.id if active else -1
     if season_id is not None:
         require(db, Season, season_id)
@@ -601,28 +806,28 @@ def stats(user: CurrentUser, db: DB, season_id: int | None = None, active_season
 
 @api.get("/notes")
 def notes(user: CurrentUser, db: DB):
-    return [row_dict(n) for n in db.scalars(select(ClubNote).order_by(ClubNote.updated_at.desc()))]
+    return [row_dict(n) for n in sorted(db.records(ClubNote), key=lambda row: row.updated_at, reverse=True)]
 
 
 @api.post("/notes", status_code=201)
+@command
 def add_note(data: S.NoteInput, user: Admin, db: DB):
     n = ClubNote(**data.model_dump())
-    db.add(n)
-    db.commit()
+    db.insert(n)
     return row_dict(n)
 
 
 @api.delete("/notes/{note_id}", status_code=204)
+@command
 def delete_note(note_id: int, user: Admin, db: DB):
-    db.delete(require(db, ClubNote, note_id))
-    db.commit()
+    db.remove(require(db, ClubNote, note_id))
 
 
 @api.get("/export/{kind}")
 def export(kind: str, user: CurrentUser, db: DB):
     if kind == "players":
         rows = statistics(db)["players"]
-        team_names = {t.id: t.name for t in db.scalars(select(Team))}
+        team_names = {t.id: t.name for t in db.records(Team)}
         for row in rows:
             row["team"] = team_names.get(row["team_id"], "Unassigned")
         fields = [
@@ -641,7 +846,7 @@ def export(kind: str, user: CurrentUser, db: DB):
             "clean_sheets",
         ]
     elif kind == "matches":
-        rows = [row_dict(m) for m in db.scalars(select(Match).order_by(Match.starts_at.desc()))]
+        rows = [row_dict(m) for m in sorted(db.records(Match), key=lambda row: row.starts_at, reverse=True)]
         fields = ["id", "title", "starts_at", "location", "kind", "status", "home_score", "away_score"]
     else:
         raise HTTPException(404, "Unknown export")
@@ -649,10 +854,9 @@ def export(kind: str, user: CurrentUser, db: DB):
     writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore")
     writer.writeheader()
     for row in rows:
-        # Neutralize spreadsheet formulas in user-controlled fields.
         writer.writerow(
             {
-                k: ("'" + v if isinstance(v, str) and v.lstrip().startswith(("=", "+", "-", "@")) else v)
+                k: "'" + v if isinstance(v, str) and v.lstrip().startswith(("=", "+", "-", "@")) else v
                 for k, v in row.items()
                 if k in fields
             }
@@ -696,7 +900,6 @@ def calendar(match_id: int, user: CurrentUser, db: DB):
         "END:VCALENDAR",
         "",
     ]
-    # Fold by UTF-8 byte length as required by RFC 5545.
     folded = []
     for line in lines:
         part = ""

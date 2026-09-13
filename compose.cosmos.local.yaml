@@ -1,0 +1,58 @@
+# Standalone local demo: docker compose -p lex-cosmos -f compose.cosmos.local.yaml up --build -d
+x-local-env: &local-env
+  DATABASE_PROVIDER: cosmos
+  COSMOS_ENDPOINT: http://cosmos-emulator:8081
+  COSMOS_DATABASE: lex_pickup_demo
+  COSMOS_CONTAINER: club_data
+  COSMOS_CLUB_ID: lex-pickup-demo
+  COSMOS_AUTH_MODE: emulator
+  COSMOS_EMULATOR: 'true'
+  # Public, documented emulator key; never accepted for an Azure deployment.
+  COSMOS_KEY: 'C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHlmDFeNp3v1xWkB7WqRE2p5CGVQ9pq5Pxl2myitc1oCZ4u6HVh5SZbQ=='
+  APP_ENV: development
+  JWT_SECRET: local-development-cosmos-demo-secret
+  COOKIE_SECURE: 'false'
+  SESSION_COOKIE_NAME: lex_cosmos_session
+  FRONTEND_URL: http://localhost:8082
+  CORS_ORIGINS: '["http://localhost:8082","http://127.0.0.1:8082"]'
+  DEMO_ENABLED: 'true'
+  REGISTRATION_ENABLED: 'true'
+  CLUB_INVITE_CODE: LEX2026
+services:
+  cosmos-emulator:
+    image: mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator@sha256:2db1f9e74c506bcf6fc347aa937aea1c00fa756061296a5a9efba530ce86ec02
+    command: ['--protocol', 'http']
+    ports:
+      - '127.0.0.1:18081:8081'
+      - '127.0.0.1:11234:1234'
+    volumes:
+      - cosmos_data:/data
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://localhost:8081/']
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+  initialize:
+    build: ./backend
+    environment: *local-env
+    entrypoint: ['python', '-m', 'app.storage.cosmos.manage', 'provision-emulator']
+    depends_on:
+      cosmos-emulator:
+        condition: service_healthy
+  backend:
+    build: ./backend
+    environment: *local-env
+    depends_on:
+      initialize:
+        condition: service_completed_successfully
+    restart: unless-stopped
+  frontend:
+    build: ./frontend
+    ports: ['8082:8080']
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+volumes:
+  cosmos_data:

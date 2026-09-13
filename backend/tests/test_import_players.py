@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 
 from app.import_players import ImportProblem, apply_review, preview, read_source
 from app.models import RSVP, Lineup, Player, PlayerImport, User
+from app.storage.sql import SqlStore, load_data
 
 from .conftest import PASSWORD
 
@@ -22,14 +23,13 @@ def source(*names):
 
 def reviewed(factory, payload, previous=None):
     with factory() as db:
-        report = preview(db, payload, previous)
+        report = preview(load_data(db), payload, previous)
     report.reviewed = True
     return report
 
 
 def apply(factory, payload, report):
-    with factory() as db:
-        return apply_review(db, payload, report)
+    return SqlStore(factory).execute(lambda db: apply_review(db, payload, report))
 
 
 def total(db, model):
@@ -39,7 +39,7 @@ def total(db, model):
 def test_clean_preview_and_unknown_profiles(session_factory):
     payload = source("Admin ·", "Sample Captain Admin ·", "  Nguyễn   Văn Mẫu  ", "Admin Smith")
     with session_factory() as db:
-        report = preview(db, payload)
+        report = preview(load_data(db), payload)
         assert total(db, Player) == 12 and total(db, PlayerImport) == 0
     assert not report.reviewed
     assert [r.name for r in report.rows] == ["", "Sample Captain", "Nguyễn Văn Mẫu", "Admin Smith"]
@@ -202,7 +202,7 @@ def test_bootstrap_admin_uses_explicit_imported_profile(session_factory, monkeyp
     apply(session_factory, payload, reviewed(session_factory, payload))
     with session_factory() as db:
         person = db.scalar(select(Player).where(Player.name == "Sample Organizer"))
-    monkeypatch.setattr(seed, "SessionLocal", session_factory)
+    monkeypatch.setattr(seed, "get_store", lambda: SqlStore(session_factory))
     monkeypatch.setattr(seed.getpass, "getpass", lambda _: PASSWORD)
     seed.seed(admin_email="organizer@example.com", admin_player_id=person.id)
     with session_factory() as db:
