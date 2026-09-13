@@ -6,35 +6,23 @@ param location string = resourceGroup().location
 @description('Base name used for the Azure resources.')
 param appName string = 'lex-pickup-pro'
 
-@description('Globally unique Azure Container Registry name. Lowercase letters and numbers only.')
-param acrName string = 'lexpickuppro${uniqueString(resourceGroup().id)}'
+@description('Existing Cosmos DB account name to reuse for the club data store.')
+param cosmosAccountName string = 'dtranllc'
 
-@description('Globally unique Cosmos DB account name. Lowercase letters and numbers only.')
-param cosmosAccountName string = 'lexpickup${uniqueString(resourceGroup().id)}'
+@description('Existing Cosmos database name.')
+param cosmosDatabaseName string = 'clubs'
 
-@description('Cosmos database name.')
-param cosmosDatabaseName string = 'lex_pickup'
-
-@description('Cosmos container name.')
+@description('Existing Cosmos container name.')
 param cosmosContainerName string = 'club_data'
-
-@description('Cosmos partition key path for club-scoped docs.')
-param cosmosPartitionKey string = '/club_id'
 
 @description('Frontend hostname, without scheme. Example: lex-pickup.example.com')
 param frontendHost string = 'lex-pickup.example.com'
 
-@description('Explicit backend image reference. If empty, a registry-backed image is used.')
-param backendImage string = ''
+@description('Explicit backend image reference for the GHCR image.')
+param backendImage string = 'ghcr.io/dinhduy/lex-pickup-pro/backend:latest'
 
-@description('Explicit frontend image reference. If empty, a registry-backed image is used.')
-param frontendImage string = ''
-
-@description('Backend image tag to deploy when not using an explicit image reference.')
-param backendImageTag string = 'latest'
-
-@description('Frontend image tag to deploy when not using an explicit image reference.')
-param frontendImageTag string = 'latest'
+@description('Explicit frontend image reference for the GHCR image.')
+param frontendImage string = 'ghcr.io/dinhduy/lex-pickup-pro/frontend:latest'
 
 @description('Production runtime environment value.')
 param appEnvironment string = 'production'
@@ -62,48 +50,16 @@ param clubInviteCode string = 'LEX2026'
 param cosmosClubId string = 'lex-pickup'
 
 var frontendOrigin = 'https://${frontendHost}'
-var backendImageResolved = empty(backendImage) ? '${acr.outputs.loginServer}/backend:${backendImageTag}' : backendImage
-var frontendImageResolved = empty(frontendImage) ? '${acr.outputs.loginServer}/frontend:${frontendImageTag}' : frontendImage
+var backendImageResolved = backendImage
+var frontendImageResolved = frontendImage
 
-module logAnalytics 'modules/log-analytics.bicep' = {
-  name: 'log-analytics'
-  params: {
-    name: '${appName}-logs'
-    location: location
-  }
-}
-
-module acr 'modules/acr.bicep' = {
-  name: 'acr'
-  params: {
-    name: acrName
-    location: location
-  }
-}
-
-module cosmos 'modules/cosmos.bicep' = {
-  name: 'cosmos'
-  params: {
-    accountName: cosmosAccountName
-    databaseName: cosmosDatabaseName
-    containerName: cosmosContainerName
-    partitionKey: cosmosPartitionKey
-    location: location
-  }
+resource cosmosAccount 'Microsoft.DocumentDB/databaseAccounts@2024-11-15' existing = {
+  name: cosmosAccountName
 }
 
 resource managedEnvironment 'Microsoft.App/managedEnvironments@2024-03-01' = {
   name: '${appName}-env'
   location: location
-  properties: {
-    appLogsConfiguration: {
-      destination: 'log-analytics'
-      logAnalyticsConfiguration: {
-        customerId: logAnalytics.outputs.workspaceCustomerId
-        sharedKey: logAnalytics.outputs.workspaceKey
-      }
-    }
-  }
 }
 
 module backend 'modules/container-app.bicep' = {
@@ -112,9 +68,6 @@ module backend 'modules/container-app.bicep' = {
     name: '${appName}-backend'
     location: location
     environmentId: managedEnvironment.id
-    registryServer: empty(backendImage) ? acr.outputs.loginServer : ''
-    registryUsername: empty(backendImage) ? acr.outputs.username : ''
-    registryPassword: empty(backendImage) ? acr.outputs.password : ''
     image: backendImageResolved
     ingressExternal: true
     targetPort: 8000
@@ -133,15 +86,15 @@ module backend 'modules/container-app.bicep' = {
       }
       {
         name: 'COSMOS_ENDPOINT'
-        value: cosmos.outputs.endpoint
+        value: cosmosAccount.properties.documentEndpoint
       }
       {
         name: 'COSMOS_DATABASE'
-        value: cosmos.outputs.database
+        value: cosmosDatabaseName
       }
       {
         name: 'COSMOS_CONTAINER'
-        value: cosmos.outputs.container
+        value: cosmosContainerName
       }
       {
         name: 'COSMOS_CLUB_ID'
@@ -149,7 +102,7 @@ module backend 'modules/container-app.bicep' = {
       }
       {
         name: 'COSMOS_KEY'
-        value: cosmos.outputs.key
+        value: cosmosAccount.listKeys().primaryMasterKey
       }
       {
         name: 'COSMOS_AUTH_MODE'
@@ -193,9 +146,6 @@ module frontend 'modules/container-app.bicep' = {
     name: '${appName}-frontend'
     location: location
     environmentId: managedEnvironment.id
-    registryServer: empty(frontendImage) ? acr.outputs.loginServer : ''
-    registryUsername: empty(frontendImage) ? acr.outputs.username : ''
-    registryPassword: empty(frontendImage) ? acr.outputs.password : ''
     image: frontendImageResolved
     ingressExternal: true
     targetPort: 8080
@@ -214,7 +164,6 @@ module frontend 'modules/container-app.bicep' = {
 
 output backendFqdn string = backend.outputs.fqdn
 output frontendFqdn string = frontend.outputs.fqdn
-output cosmosEndpoint string = cosmos.outputs.endpoint
-output cosmosDatabase string = cosmos.outputs.database
-output cosmosContainer string = cosmos.outputs.container
-output acrLoginServer string = acr.outputs.loginServer
+output cosmosEndpoint string = cosmosAccount.properties.documentEndpoint
+output cosmosDatabase string = cosmosDatabaseName
+output cosmosContainer string = cosmosContainerName
