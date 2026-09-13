@@ -33,6 +33,98 @@ docker compose -p lex-cosmos -f compose.cosmos.local.yaml up --build -d
 
 This separate Cosmos demo opens at **http://localhost:8082** and preserves the SQL demo and real-club volumes. Real Azure rollout requires the cloud acceptance checks in the guide.
 
+## Azure Container Apps deployment (Cosmos DB only)
+
+This project is also set up for a lightweight Azure Container Apps deployment using Cosmos DB for NoSQL as the single database. The Bicep templates live in [infra/aca/main.bicep](infra/aca/main.bicep) and the workflow is defined in [.github/workflows/deploy-aca.yml](.github/workflows/deploy-aca.yml).
+
+### 1) Prerequisites
+
+- An Azure subscription with permission to create resource groups, Container Apps, Cosmos DB, ACR, and Log Analytics.
+- A GitHub repository with the follow secrets configured:
+  - `AZURE_CLIENT_ID`
+  - `AZURE_TENANT_ID`
+  - `AZURE_SUBSCRIPTION_ID`
+  - `AZURE_RESOURCE_GROUP`
+  - `AZURE_LOCATION`
+  - `ACR_NAME`
+  - `APP_NAME`
+  - `FRONTEND_HOST`
+  - `JWT_SECRET`
+  - `CLUB_INVITE_CODE`
+- A custom domain or public hostname for the frontend, such as `https://lex-pickup.example.com`.
+
+### 2) Backend environment
+
+Use the sample backend environment file at [.env.real](.env.real) as the production template. It uses `DATABASE_PROVIDER=cosmos` and sets the required Cosmos values:
+
+```dotenv
+APP_ENV=production
+DATABASE_PROVIDER=cosmos
+COSMOS_ENDPOINT=https://<your-account-name>.documents.azure.com:443/
+COSMOS_DATABASE=lex_pickup
+COSMOS_CONTAINER=club_data
+COSMOS_CLUB_ID=lex-pickup
+COSMOS_AUTH_MODE=managed_identity
+JWT_SECRET=<at-least-32-random-characters>
+COOKIE_SECURE=true
+FRONTEND_URL=https://lex-pickup.example.com
+CORS_ORIGINS=["https://lex-pickup.example.com"]
+CLUB_INVITE_CODE=LEX2026
+DEMO_ENABLED=false
+```
+
+The app validates production settings and requires HTTPS for `FRONTEND_URL`, an explicit CORS list, a strong JWT secret, and a non-demo configuration.
+
+### 3) Deploy the Azure resources
+
+From the repository root:
+
+```bash
+az login
+az account set --subscription "<subscription-id>"
+az group create --name "<resource-group>" --location "eastus2"
+az deployment group create \
+  --resource-group "<resource-group>" \
+  --template-file infra/aca/main.bicep \
+  --parameters \
+    location="eastus2" \
+    appName="lex-pickup-pro" \
+    frontendHost="lex-pickup.example.com" \
+    backendImageTag=latest \
+    frontendImageTag=latest \
+    jwtSecret="<strong-secret>" \
+    clubInviteCode="LEX2026"
+```
+
+This provisions:
+
+- Azure Container Apps environment
+- Azure Container Registry
+- Log Analytics
+- Cosmos DB account and data container
+- backend and frontend Container Apps
+
+### 4) GitHub Actions deployment
+
+The workflow in [.github/workflows/deploy-aca.yml](.github/workflows/deploy-aca.yml) builds both container images and deploys them to Azure Container Apps. It requires the repository secrets listed above and is intended for push-based or manual deployment.
+
+### 5) Post-deploy validation
+
+After the workflow completes, verify:
+
+- the frontend resolves on the configured hostname
+- the backend health endpoint responds successfully
+- sign-in works with the seeded or real club admin account
+- the app can read and write documents in Cosmos DB
+- `COOKIE_SECURE=true` and HTTPS is active in production
+
+### 6) Operational notes
+
+- Keep the Cosmos account and Container Apps in the same region when possible to minimize latency.
+- Use a single ACA environment and small replica counts for the initial free-tier implementation.
+- Keep `DEMO_ENABLED=false` and replace the default invite code before opening a real club.
+- Use managed identity where possible; only use the Cosmos key when absolutely necessary.
+
 ## Quick start: Docker demo
 
 For the real Messenger roster, use the [player import guide](docs/PLAYER_IMPORT.md). It covers the separate real-club Docker stack at port 8081, reviewed and repeatable imports, unknown profile fields, primary team assignments, administrator bootstrap and invitations. The demo database stays separate.

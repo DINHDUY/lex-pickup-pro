@@ -1,0 +1,57 @@
+name: Deploy to Azure Container Apps
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - 'infra/aca/**'
+      - '.github/workflows/deploy-aca.yml'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+      AZURE_LOCATION: ${{ secrets.AZURE_LOCATION || 'eastus2' }}
+      APP_NAME: ${{ secrets.APP_NAME || 'lex-pickup-pro' }}
+      FRONTEND_HOST: ${{ secrets.FRONTEND_HOST }}
+      JWT_SECRET: ${{ secrets.JWT_SECRET }}
+      CLUB_INVITE_CODE: ${{ secrets.CLUB_INVITE_CODE || 'LEX2026' }}
+      BACKEND_IMAGE: ghcr.io/dinhduy/lex-pickup-pro/backend:latest
+      FRONTEND_IMAGE: ghcr.io/dinhduy/lex-pickup-pro/frontend:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy infrastructure
+        run: |
+          az group create --name "$AZURE_RESOURCE_GROUP" --location "$AZURE_LOCATION"
+          az deployment group create \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --template-file infra/aca/main.bicep \
+            --parameters \
+              location="$AZURE_LOCATION" \
+              appName="$APP_NAME" \
+              frontendHost="$FRONTEND_HOST" \
+              backendImage="$BACKEND_IMAGE" \
+              frontendImage="$FRONTEND_IMAGE" \
+              jwtSecret="$JWT_SECRET" \
+              clubInviteCode="$CLUB_INVITE_CODE"
+
+      - name: Smoke test
+        run: |
+          echo "ACA deployment job completed. Check app URLs in the Azure Portal." 
