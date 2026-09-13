@@ -3,7 +3,7 @@ name: Deploy to Azure Container Apps
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [master]
     paths:
       - 'backend/**'
       - 'frontend/**'
