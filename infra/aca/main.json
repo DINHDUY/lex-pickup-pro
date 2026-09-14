@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.47.16.16243",
-      "templateHash": "2203218773983441494"
+      "templateHash": "5394617544671461577"
     }
   },
   "parameters": {
@@ -52,9 +52,9 @@
     },
     "frontendHost": {
       "type": "string",
-      "defaultValue": "lex-pickup.example.com",
+      "defaultValue": "www.lex-pickup-pro.us",
       "metadata": {
-        "description": "Frontend hostname, without scheme. Example: lex-pickup.example.com"
+        "description": "Frontend hostname, without scheme. Example: www.lex-pickup-pro.us"
       }
     },
     "backendImage": {
@@ -137,7 +137,13 @@
       "type": "Microsoft.App/managedEnvironments",
       "apiVersion": "2024-03-01",
       "name": "[format('{0}-env', parameters('appName'))]",
-      "location": "[parameters('location')]"
+      "location": "[parameters('location')]",
+      "properties": {
+        "zoneRedundant": false,
+        "appLogsConfiguration": {
+          "destination": "azure-monitor"
+        }
+      }
     },
     {
       "type": "Microsoft.Resources/deployments",
@@ -227,7 +233,7 @@
               },
               {
                 "name": "CORS_ORIGINS",
-                "value": "[format('[\"{0}\"]', variables('frontendOrigin'))]"
+                "value": "[format('[[\"{0}\"]', variables('frontendOrigin'))]"
               },
               {
                 "name": "CLUB_INVITE_CODE",

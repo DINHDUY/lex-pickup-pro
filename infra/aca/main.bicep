@@ -19,8 +19,8 @@ param cosmosDatabaseName string = 'clubs'
 @description('Existing Cosmos container name.')
 param cosmosContainerName string = 'club_data'
 
-@description('Frontend hostname, without scheme. Example: lex-pickup.example.com')
-param frontendHost string = 'lex-pickup.example.com'
+@description('Frontend hostname, without scheme. Example: www.lex-pickup-pro.us')
+param frontendHost string = 'www.lex-pickup-pro.us'
 
 @description('Explicit backend image reference for the GHCR image.')
 param backendImage string = 'ghcr.io/dinhduy/lex-pickup-pro/backend:latest'
@@ -47,8 +47,11 @@ param frontendMaxReplicas int = 1
 @secure()
 param jwtSecret string
 
-@description('Invitation code used to onboard club members.')
+@description('Invitation code used to onboard club members. Must not be LEX2026 when registration is enabled.')
 param clubInviteCode string = 'LEX2026'
+
+@description('Allow self-service registration with the club invitation code. Keep false in production unless clubInviteCode is unique.')
+param registrationEnabled bool = false
 
 @description('Single cluster ID used within Cosmos data documents.')
 param cosmosClubId string = 'lex-pickup'
@@ -60,6 +63,12 @@ var frontendImageResolved = frontendImage
 resource managedEnvironment 'Microsoft.App/managedEnvironments@2024-03-01' = {
   name: '${appName}-env'
   location: location
+  properties: {
+    zoneRedundant: false
+    appLogsConfiguration: {
+      destination: 'azure-monitor'
+    }
+  }
 }
 
 module backend 'modules/container-app.bicep' = {
@@ -122,7 +131,7 @@ module backend 'modules/container-app.bicep' = {
       }
       {
         name: 'CORS_ORIGINS'
-        value: '["${frontendOrigin}"]'
+        value: '[["${frontendOrigin}"]'
       }
       {
         name: 'CLUB_INVITE_CODE'
@@ -130,7 +139,7 @@ module backend 'modules/container-app.bicep' = {
       }
       {
         name: 'REGISTRATION_ENABLED'
-        value: 'true'
+        value: registrationEnabled ? 'true' : 'false'
       }
       {
         name: 'DEMO_ENABLED'

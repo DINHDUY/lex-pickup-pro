@@ -51,7 +51,7 @@ This project is also set up for a lightweight Azure Container Apps deployment us
   - `FRONTEND_HOST`
   - `JWT_SECRET`
   - `CLUB_INVITE_CODE`
-- A custom domain or public hostname for the frontend, such as `https://lex-pickup.example.com`.
+- A custom domain or public hostname for the frontend, such as `https://www.lex-pickup-pro.us`.
 
 ### 2) Backend environment
 
@@ -67,9 +67,10 @@ COSMOS_CLUB_ID=lex-pickup
 COSMOS_AUTH_MODE=managed_identity
 JWT_SECRET=<at-least-32-random-characters>
 COOKIE_SECURE=true
-FRONTEND_URL=https://lex-pickup.example.com
-CORS_ORIGINS=["https://lex-pickup.example.com"]
-CLUB_INVITE_CODE=LEX2026
+FRONTEND_URL=https://www.lex-pickup-pro.us
+CORS_ORIGINS=["https://www.lex-pickup-pro.us"]
+CLUB_INVITE_CODE=<a-unique-code-for-your-club>
+REGISTRATION_ENABLED=false
 DEMO_ENABLED=false
 ```
 
@@ -89,11 +90,12 @@ az deployment group create \
   --parameters \
     location="eastus2" \
     appName="lex-pickup-pro" \
-    frontendHost="lex-pickup.example.com" \
+    frontendHost="www.lex-pickup-pro.us" \
     backendImageTag=latest \
     frontendImageTag=latest \
     jwtSecret="<strong-secret>" \
-    clubInviteCode="LEX2026"
+    clubInviteCode="<a-unique-code-for-your-club>" \
+    registrationEnabled=false
 ```
 
 This provisions:
