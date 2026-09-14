@@ -59,6 +59,34 @@ docker compose exec backend python -m app.seed --admin-email organizer@example.c
 
 This prompts for a display name and password; no password is passed on the command line or stored in shell history. It initializes the two fixed teams and an active season if needed. `REGISTRATION_ENABLED=false` closes code-based registration, while individually issued profile invitations still work.
 
+## Azure Container Apps startup configuration
+
+The ACA template defaults to `REGISTRATION_ENABLED=false` and `DEMO_ENABLED=false`. To enable code-based registration, set `registrationEnabled=true` and supply a unique `clubInviteCode` other than `LEX2026`.
+
+Deploy from `infra/aca/main.bicep` when using the Azure CLI. If uploading the ARM JSON template in the portal, regenerate it after Bicep changes:
+
+```bash
+az bicep build --file infra/aca/main.bicep --outfile infra/aca/main.json
+```
+
+An older `main.json` hardcoded `REGISTRATION_ENABLED=true` while defaulting the invitation code to `LEX2026`. This fails production validation even with `DEMO_ENABLED=false`. For an existing backend, apply the closed-registration configuration without redeploying all resources:
+
+```bash
+az containerapp update \
+  --resource-group "<resource-group>" \
+  --name "<app-name>-backend" \
+  --set-env-vars REGISTRATION_ENABLED=false DEMO_ENABLED=false \
+  --output none
+```
+
+This creates a new revision. Individually issued profile invitations still work with code-based registration disabled. Container Apps receives settings from its deployment environment; editing a local `.env` file does not update a running revision.
+
+After settings validation, startup checks Cosmos access and storage compatibility. For an existing Cosmos account, verify the [Cosmos setup requirements](COSMOS_DB.md#application-configuration-and-startup):
+
+- `default_credential` requires an available Entra credential. The current backend uses `COSMOS_KEY` only in local emulator mode; supplying an Azure account key does not authenticate this mode.
+- The account must use Strong consistency with a single write region. Consistency is an account-wide setting, including other databases in a shared account.
+- The configured database/container must exist, with partition key `/club_id`, unique key `/identity_key`, and an initialized club control document.
+
 ## Authentication and authorization
 
 - Argon2 password hashes; no plaintext password storage.

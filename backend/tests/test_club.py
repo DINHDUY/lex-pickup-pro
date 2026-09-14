@@ -540,6 +540,40 @@ def test_production_configuration_fails_closed():
     assert config.cookie_secure
 
 
+@pytest.mark.parametrize(
+    ("registration_enabled", "club_invite_code", "demo_enabled", "error"),
+    [
+        ("false", "LEX2026", "false", None),
+        ("true", "unique-club-code", "false", None),
+        ("true", "LEX2026", "false", "unique CLUB_INVITE_CODE"),
+        ("false", "LEX2026", "true", "DEMO_ENABLED=false"),
+        ("true", "unique-club-code", "true", "DEMO_ENABLED=false"),
+    ],
+)
+def test_production_registration_settings_from_environment(
+    monkeypatch, registration_enabled, club_invite_code, demo_enabled, error
+):
+    for name, value in {
+        "APP_ENV": "production",
+        "JWT_SECRET": "x" * 64,
+        "COOKIE_SECURE": "true",
+        "FRONTEND_URL": "https://club.example",
+        "CORS_ORIGINS": '["https://club.example"]',
+        "REGISTRATION_ENABLED": registration_enabled,
+        "CLUB_INVITE_CODE": club_invite_code,
+        "DEMO_ENABLED": demo_enabled,
+    }.items():
+        monkeypatch.setenv(name, value)
+
+    if error:
+        with pytest.raises(ValueError, match=error):
+            Settings(_env_file=None)
+    else:
+        config = Settings(_env_file=None)
+        assert config.registration_enabled is (registration_enabled == "true")
+        assert config.demo_enabled is False
+
+
 def test_reminder_delivery_is_signed_and_deduplicated(session_factory, monkeypatch, capsys):
     from app import reminders
 

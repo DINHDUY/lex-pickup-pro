@@ -58,8 +58,13 @@ class Settings(BaseSettings):
                 raise ValueError("Production requires a unique JWT_SECRET of at least 32 characters")
             if not self.cookie_secure or not self.frontend_url.startswith("https://"):
                 raise ValueError("Production requires COOKIE_SECURE=true and HTTPS FRONTEND_URL")
-            if self.demo_enabled or (self.registration_enabled and self.club_invite_code == "LEX2026"):
-                raise ValueError("Disable demo mode and replace the default invitation code in production")
+            if self.demo_enabled:
+                raise ValueError("Production requires DEMO_ENABLED=false")
+            if self.registration_enabled and self.club_invite_code == "LEX2026":
+                raise ValueError(
+                    "Production requires a unique CLUB_INVITE_CODE when REGISTRATION_ENABLED=true; "
+                    "replace LEX2026 or set REGISTRATION_ENABLED=false"
+                )
             if "*" in self.cors_origins:
                 raise ValueError("Production CORS origins must be explicit")
         if self.facebook_auth_enabled:

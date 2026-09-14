@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.47.16.16243",
-      "templateHash": "5394617544671461577"
+      "templateHash": "3842059638178855978"
     }
   },
   "parameters": {
@@ -116,7 +116,14 @@
       "type": "string",
       "defaultValue": "LEX2026",
       "metadata": {
-        "description": "Invitation code used to onboard club members."
+        "description": "Invitation code used to onboard club members. Must not be LEX2026 when registration is enabled."
+      }
+    },
+    "registrationEnabled": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Allow self-service registration with the club invitation code. Keep false in production unless clubInviteCode is unique."
       }
     },
     "cosmosClubId": {
@@ -241,7 +248,7 @@
               },
               {
                 "name": "REGISTRATION_ENABLED",
-                "value": "true"
+                "value": "[if(parameters('registrationEnabled'), 'true', 'false')]"
               },
               {
                 "name": "DEMO_ENABLED",
