@@ -10,12 +10,15 @@ export function Login({ returnTo }: { returnTo: string }) {
   const inviteToken = new URLSearchParams(window.location.search).get('invite') || ''
   const [register, setRegister] = useState(!!inviteToken),
     [busy, setBusy] = useState(false),
-    [error, setError] = useState('')
+    [error, setError] = useState(new URLSearchParams(window.location.search).get('facebook_error') || '')
+  const [passwordLogin, setPasswordLogin] = useState(false)
   const [demoRole, setDemoRole] = useState('admin')
   const config = useQuery({
     queryKey: ['config'],
     queryFn: () =>
-      api<{ demo_enabled: boolean; registration_enabled: boolean; facebook_auth_enabled: boolean }>('/config'),
+      api<{ demo_enabled: boolean; registration_enabled: boolean; facebook_auth_enabled: boolean }>(
+        '/config',
+      ),
   })
   const navigate = useNavigate()
   const facebookAuthEnabled = config.data?.facebook_auth_enabled ?? false
@@ -105,7 +108,7 @@ export function Login({ returnTo }: { returnTo: string }) {
                 : 'A familiar face. A place on the team sheet.'
               : 'Welcome to your home off the pitch.'}
           </p>
-          {facebookAuthEnabled ? (
+          {facebookAuthEnabled && !passwordLogin ? (
             <div className="form-stack">
               <Button
                 className="login-submit"
@@ -113,15 +116,42 @@ export function Login({ returnTo }: { returnTo: string }) {
                 onClick={() => {
                   const fbUrl = new URL('/api/v1/auth/facebook/login', window.location.origin)
                   if (inviteToken) fbUrl.searchParams.set('invite', inviteToken)
+                  if (error) fbUrl.searchParams.set('rerequest', '1')
                   window.location.href = fbUrl.toString()
                 }}
               >
                 Continue with Facebook
                 <ArrowRight size={17} />
               </Button>
+              {error && (
+                <p className="form-error" role="alert">
+                  {error}
+                </p>
+              )}
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  setPasswordLogin(true)
+                  setRegister(false)
+                  setError('')
+                }}
+              >
+                Sign in with email and password
+              </Button>
             </div>
           ) : (
             <>
+              {facebookAuthEnabled && (
+                <Button
+                  variant="ghost"
+                  onClick={() => {
+                    setPasswordLogin(false)
+                    setError('')
+                  }}
+                >
+                  Continue with Facebook
+                </Button>
+              )}
               <form className="form-stack" onSubmit={submit}>
                 {register && !inviteToken && (
                   <label>
@@ -138,7 +168,13 @@ export function Login({ returnTo }: { returnTo: string }) {
                 )}
                 <label>
                   Email address
-                  <input name="email" type="email" placeholder="you@example.com" autoComplete="email" required />
+                  <input
+                    name="email"
+                    type="email"
+                    placeholder="you@example.com"
+                    autoComplete="email"
+                    required
+                  />
                 </label>
                 <label>
                   Password
@@ -224,7 +260,6 @@ export function Login({ returnTo }: { returnTo: string }) {
                 </div>
               )}
             </>
-            
           )}
           <div className="login-trust">
             <ShieldCheck size={15} />

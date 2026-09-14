@@ -21,8 +21,8 @@ _attempts: dict[str, deque] = defaultdict(deque)
 _lock = Lock()
 
 
-def throttle(request: Request):
-    key = request.client.host if request.client else "unknown"
+def throttle(request: Request, *, bucket="auth", limit=20):
+    key = f"{bucket}:{request.client.host if request.client else 'unknown'}"
     now = monotonic()
     with _lock:
         # Bound memory and expire inactive IPs. Put a shared limiter at the edge for multiple workers.
@@ -31,7 +31,7 @@ def throttle(request: Request):
         queue = _attempts[key]
         while queue and now - queue[0] > 600:
             queue.popleft()
-        if len(queue) >= 20:
+        if len(queue) >= limit:
             raise HTTPException(
                 429, "Too many attempts. Please try again in 10 minutes.", headers={"Retry-After": "600"}
             )

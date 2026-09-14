@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.47.16.16243",
-      "templateHash": "7261055604105742987"
+      "templateHash": "5695776006581420504"
     }
   },
   "parameters": {
@@ -124,6 +124,13 @@
       "defaultValue": false,
       "metadata": {
         "description": "Allow self-service registration with the club invitation code. Keep false in production unless clubInviteCode is unique."
+      }
+    },
+    "facebookRosterClaimingEnabled": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Allow Facebook users to immediately claim any active roster profile without an account."
       }
     },
     "cosmosClubId": {
@@ -249,6 +256,10 @@
               {
                 "name": "REGISTRATION_ENABLED",
                 "value": "[if(parameters('registrationEnabled'), 'true', 'false')]"
+              },
+              {
+                "name": "FACEBOOK_ROSTER_CLAIMING_ENABLED",
+                "value": "[if(parameters('facebookRosterClaimingEnabled'), 'true', 'false')]"
               },
               {
                 "name": "DEMO_ENABLED",

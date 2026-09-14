@@ -75,6 +75,32 @@ class User(Record):
     created_at: datetime = Field(default_factory=utcnow)
 
 
+class ExternalIdentity(Record):
+    table_name: ClassVar[str] = "external_identities"
+    id: int = 0
+    provider: str = "facebook"
+    app_id: str
+    subject: str
+    user_id: int
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class FacebookOnboarding(Record):
+    table_name: ClassVar[str] = "facebook_onboarding"
+    id: int = 0
+    token_hash: str
+    app_id: str
+    subject: str
+    email: str
+    name: str
+    expires_at: datetime
+    invitation_id: int | None = None
+    user_id: int | None = None
+    session_version: int | None = None
+    completed_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+
+
 class Season(Record):
     table_name: ClassVar[str] = "seasons"
     id: int = 0
@@ -177,6 +203,8 @@ RECORDS = (
     User,
     Season,
     Invitation,
+    ExternalIdentity,
+    FacebookOnboarding,
     Match,
     RSVP,
     Lineup,

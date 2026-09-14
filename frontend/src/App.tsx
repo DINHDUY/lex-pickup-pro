@@ -14,6 +14,8 @@ import { Availability } from './pages/Availability'
 import { Club } from './pages/Club'
 import { MatchPage } from './pages/MatchPage'
 
+import { ClaimProfile, type Onboarding } from './pages/ClaimProfile'
+
 const Analytics = lazy(() => import('./pages/Analytics'))
 
 export default function App() {
@@ -31,6 +33,20 @@ export default function App() {
     },
     retry: false,
   })
+  const onboarding = useQuery({
+    queryKey: ['onboarding'],
+    queryFn: async () => {
+      try {
+        return await api<Onboarding>('/auth/onboarding')
+      } catch (e) {
+        if (e instanceof ApiError && (e.status === 401 || e.status === 403)) return null
+        throw e
+      }
+    },
+    enabled: me.isSuccess && !me.data,
+    retry: false,
+    staleTime: 0,
+  })
   useEffect(() => {
     const update = () => setOnline(navigator.onLine)
     window.addEventListener('online', update)
@@ -45,7 +61,14 @@ export default function App() {
   }, [location.pathname])
   if (me.isPending) return <Loading />
   if (me.error) return <ErrorState error={me.error} />
-  if (!me.data) return <Login returnTo={location.pathname !== '/login' ? location.pathname : '/'} />
+  if (!me.data) {
+    if (onboarding.isPending) return <Loading />
+    if (onboarding.error) return <ErrorState error={onboarding.error} />
+    if (onboarding.data || location.pathname === '/onboarding/claim-profile') {
+      return <ClaimProfile session={onboarding.data ?? null} />
+    }
+    return <Login returnTo={location.pathname !== '/login' ? location.pathname : '/'} />
+  }
   const user = me.data
   return (
     <>
@@ -68,6 +91,7 @@ export default function App() {
             <Route path="/history" element={<Schedule user={user} history />} />
             <Route path="/club" element={<Club user={user} />} />
             <Route path="/login" element={<Navigate to="/" replace />} />
+            <Route path="/onboarding/claim-profile" element={<Navigate to="/" replace />} />
             <Route
               path="*"
               element={

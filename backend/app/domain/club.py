@@ -74,10 +74,13 @@ class ClubData:
     @classmethod
     def load(cls, value):
         data = cls(counters=dict(value.get("counters", {})))
-        if set(value["tables"]) != {m.table_name for m in RECORDS}:
+        known = {m.table_name for m in RECORDS}
+        # Pre-onboarding backups remain importable without rewriting existing records.
+        optional = {"external_identities", "facebook_onboarding"}
+        if set(value["tables"]) - known or known - set(value["tables"]) - optional:
             raise ValueError("Unknown or missing snapshot tables")
         for model in RECORDS:
-            for record in value["tables"][model.table_name]:
+            for record in value["tables"].get(model.table_name, []):
                 data.insert(model.model_validate(record))
         data.validate()
         return data
@@ -89,6 +92,8 @@ class ClubData:
             R.Player: {"team_id": R.Team},
             R.PlayerImport: {"player_id": R.Player},
             R.User: {"player_id": R.Player},
+            R.ExternalIdentity: {"user_id": R.User},
+            R.FacebookOnboarding: {"user_id": R.User, "invitation_id": R.Invitation},
             R.Invitation: {"player_id": R.Player},
             R.Match: {"season_id": R.Season, "created_by": R.User},
             R.RSVP: {"match_id": R.Match, "player_id": R.Player},
@@ -99,6 +104,8 @@ class ClubData:
         }
         unique = {
             R.User: [("email",), ("player_id",)],
+            R.ExternalIdentity: [("provider", "app_id", "subject"), ("provider", "app_id", "user_id")],
+            R.FacebookOnboarding: [("token_hash",)],
             R.PlayerImport: [("player_id",)],
             R.Invitation: [("token_hash",)],
             R.RSVP: [("match_id", "player_id")],

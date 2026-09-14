@@ -80,6 +80,9 @@ def test_facebook_callback_creates_user_for_valid_oauth_flow(client, session_fac
             self._payload = payload
             self.status_code = 200
 
+        def raise_for_status(self):
+            pass
+
         def json(self):
             return self._payload
 
@@ -92,13 +95,15 @@ def test_facebook_callback_creates_user_for_valid_oauth_flow(client, session_fac
         assert params["fields"] == "id,email,name"
         return FakeResponse({"id": "fb-user-123", "email": "facebook@example.com", "name": "Facebook User"})
 
-    monkeypatch.setattr("app.main.httpx.post", fake_post, raising=False)
-    monkeypatch.setattr("app.main.httpx.get", fake_get, raising=False)
+    monkeypatch.setattr("app.facebook.httpx.post", fake_post, raising=False)
+    monkeypatch.setattr("app.facebook.httpx.get", fake_get, raising=False)
 
+    client.get(f"{API}/auth/facebook/login", follow_redirects=False)
+    state = client.cookies.get("facebook_oauth_state")
     response = client.get(
-        f"{API}/auth/facebook/callback?code=test-code&state=test-state",
+        f"{API}/auth/facebook/callback",
+        params={"code": "test-code", "state": state},
         follow_redirects=False,
-        cookies={"facebook_oauth_state": "test-state"},
     )
     assert response.status_code == 302
     assert response.headers["location"].endswith("/")
@@ -119,6 +124,9 @@ def test_facebook_callback_requires_registration_gate_when_closed(client, monkey
             self._payload = payload
             self.status_code = 200
 
+        def raise_for_status(self):
+            pass
+
         def json(self):
             return self._payload
 
@@ -128,16 +136,19 @@ def test_facebook_callback_requires_registration_gate_when_closed(client, monkey
     def fake_get(url, params=None, timeout=None):
         return FakeResponse({"id": "fb-user-456", "email": "restricted@example.com", "name": "Blocked User"})
 
-    monkeypatch.setattr("app.main.httpx.post", fake_post, raising=False)
-    monkeypatch.setattr("app.main.httpx.get", fake_get, raising=False)
+    monkeypatch.setattr("app.facebook.httpx.post", fake_post, raising=False)
+    monkeypatch.setattr("app.facebook.httpx.get", fake_get, raising=False)
 
+    client.get(f"{API}/auth/facebook/login", follow_redirects=False)
+    state = client.cookies.get("facebook_oauth_state")
     response = client.get(
-        f"{API}/auth/facebook/callback?code=test-code&state=blocked",
+        f"{API}/auth/facebook/callback",
+        params={"code": "test-code", "state": state},
         follow_redirects=False,
-        cookies={"facebook_oauth_state": "blocked"},
     )
-    assert response.status_code == 403
-    assert response.json()["detail"] == "Registration is closed. Contact a captain."
+    assert response.status_code == 302
+    assert "Registration+is+closed" in response.headers["location"]
+    assert client.get(f"{API}/auth/me").status_code == 401
 
 
 def test_facebook_auth_requires_secure_production_configuration():

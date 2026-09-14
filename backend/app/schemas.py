@@ -13,6 +13,14 @@ class Login(Input):
     password: Annotated[str, StringConstraints(strip_whitespace=False)] = Field(min_length=1, max_length=128)
 
 
+class FacebookClaim(Input):
+    player_id: int = Field(gt=0)
+
+
+class FacebookLink(Input):
+    password: Annotated[str, StringConstraints(strip_whitespace=False)] = Field(min_length=1, max_length=128)
+
+
 class Register(Login):
     password: Annotated[str, StringConstraints(strip_whitespace=False)] = Field(min_length=10, max_length=128)
     name: str = Field(min_length=2, max_length=80)

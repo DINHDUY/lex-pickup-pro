@@ -196,3 +196,22 @@ The service worker never caches `/api` responses or queues mutations. Offline us
 - Check logs, disk usage, database backups, and certificate renewal in your host’s monitoring system.
 
 No hosted deployment, Facebook credentials, TLS certificate, backup service, or external webhook is provisioned automatically by the source code.
+
+
+## Facebook roster claiming
+
+After deploying the updated frontend and backend, enable `FACEBOOK_ROSTER_CLAIMING_ENABLED=true` on the backend to let first-time Facebook members select any active profile without an account. This works with `REGISTRATION_ENABLED=false`. The selected profile is bound to the Facebook identity and server-supplied email immediately after confirmation, preserving its history and creating a normal player account.
+
+The backend also needs `FACEBOOK_AUTH_ENABLED=true`, `FACEBOOK_APP_ID`, `FACEBOOK_APP_SECRET`, and `FACEBOOK_REDIRECT_URI=https://www.lex-pickup-pro.us/api/v1/auth/facebook/callback`. Register that exact callback in Facebook's Valid OAuth Redirect URIs. Keep `FRONTEND_URL=https://www.lex-pickup-pro.us`, secure cookies enabled, and the frontend origin in `CORS_ORIGINS`. Existing accounts confirm their password once to link Facebook; password sign-in remains available. Facebook must supply an email for a new account.
+
+For an already configured ACA backend, after deploying compatible images and retiring old revisions:
+
+```bash
+az containerapp update \
+  --resource-group rg-lex-pickup-pro \
+  --name lex-pickup-pro-backend \
+  --set-env-vars FACEBOOK_ROSTER_CLAIMING_ENABLED=true REGISTRATION_ENABLED=false \
+  --output none
+```
+
+The flag defaults to false. The Bicep equivalent is `facebookRosterClaimingEnabled=true`. SQL requires the new Alembic migration; Cosmos requires the new backend on all workers before any new Facebook identity records are written. See [the implementation and rollout details](FACEBOOK_ONBOARDING_PLAN.md#storage-and-rollout), including the Cosmos compatibility check and rollback constraints.

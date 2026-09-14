@@ -7342,3 +7342,80 @@ textarea::placeholder {
 .profile-hero.team-null {
   background: var(--surface);
 }
+
+/* First Facebook sign-in is outside the member navigation until a profile is claimed. */
+.claim-page {
+  min-height: 100dvh;
+  padding: 40px 20px;
+  display: grid;
+  place-items: start center;
+}
+.claim-panel {
+  width: 100%;
+  max-width: 760px;
+  display: grid;
+  gap: 18px;
+}
+.claim-panel h1 {
+  font-size: clamp(26px, 5vw, 36px);
+  line-height: 1.2;
+}
+.claim-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  font-size: 20px;
+}
+.claim-email {
+  overflow-wrap: anywhere;
+}
+.claim-search {
+  display: grid;
+  gap: 8px;
+  font-weight: 600;
+}
+.claim-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.claim-candidate {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-align: left;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  color: inherit;
+  cursor: pointer;
+}
+.claim-candidate:hover {
+  border-color: var(--green);
+}
+.claim-candidate > span:last-child {
+  display: grid;
+  gap: 4px;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.claim-candidate small {
+  opacity: 0.8;
+}
+.claim-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+}
+@media (max-width: 600px) {
+  .claim-page {
+    padding: 24px 16px;
+  }
+  .claim-grid {
+    grid-template-columns: 1fr;
+  }
+}

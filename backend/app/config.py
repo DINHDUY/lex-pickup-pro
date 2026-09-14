@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     club_invite_code: str = "LEX2026"
     registration_enabled: bool = True
     demo_enabled: bool = False
+    facebook_roster_claiming_enabled: bool = False
     facebook_auth_enabled: bool = False
     facebook_app_id: str = ""
     facebook_app_secret: str = ""

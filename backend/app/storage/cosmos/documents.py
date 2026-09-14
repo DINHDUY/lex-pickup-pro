@@ -40,6 +40,11 @@ def encode(data, club):
             if model == R.Invitation:
                 item_id = f"invitation_{record.token_hash}"
             doc = document(club, kind, item_id, record.model_dump(mode="json"))
+            if model == R.ExternalIdentity:
+                identity = encoded([record.provider, record.app_id, record.subject])
+                doc["identity_key"] = "external_" + hashlib.sha256(identity).hexdigest()
+            if model == R.FacebookOnboarding:
+                doc["identity_key"] = "onboarding_" + record.token_hash
             if model == R.Player:
                 imported = data.first(R.PlayerImport, player_id=record.id)
                 if imported:

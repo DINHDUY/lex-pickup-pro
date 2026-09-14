@@ -93,6 +93,36 @@ class Invitation(Base):
     used: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class ExternalIdentity(Base):
+    __tablename__ = "external_identities"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    provider: Mapped[str] = mapped_column(String(20), default="facebook")
+    app_id: Mapped[str] = mapped_column(String(100))
+    subject: Mapped[str] = mapped_column(String(200))
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    __table_args__ = (
+        UniqueConstraint("provider", "app_id", "subject"),
+        UniqueConstraint("provider", "app_id", "user_id"),
+    )
+
+
+class FacebookOnboarding(Base):
+    __tablename__ = "facebook_onboarding"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    app_id: Mapped[str] = mapped_column(String(100))
+    subject: Mapped[str] = mapped_column(String(200))
+    email: Mapped[str] = mapped_column(String(254))
+    name: Mapped[str] = mapped_column(String(200))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    invitation_id: Mapped[int | None] = mapped_column(ForeignKey("invitations.id"), nullable=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    session_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Match(Base):
     __tablename__ = "matches"
     id: Mapped[int] = mapped_column(primary_key=True)

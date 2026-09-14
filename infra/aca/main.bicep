@@ -53,6 +53,9 @@ param clubInviteCode string = 'LEX2026'
 @description('Allow self-service registration with the club invitation code. Keep false in production unless clubInviteCode is unique.')
 param registrationEnabled bool = false
 
+@description('Allow Facebook users to immediately claim any active roster profile without an account.')
+param facebookRosterClaimingEnabled bool = false
+
 @description('Single cluster ID used within Cosmos data documents.')
 param cosmosClubId string = 'lex-pickup'
 
@@ -142,6 +145,10 @@ module backend 'modules/container-app.bicep' = {
       {
         name: 'REGISTRATION_ENABLED'
         value: registrationEnabled ? 'true' : 'false'
+      }
+      {
+        name: 'FACEBOOK_ROSTER_CLAIMING_ENABLED'
+        value: facebookRosterClaimingEnabled ? 'true' : 'false'
       }
       {
         name: 'DEMO_ENABLED'

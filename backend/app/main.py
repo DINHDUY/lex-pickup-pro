@@ -5,14 +5,12 @@ import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
-from urllib.parse import urlencode
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-import httpx
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from . import schemas as S
@@ -20,6 +18,7 @@ from .config import get_settings
 from .domain.records import (
     RSVP,
     ClubNote,
+    FacebookOnboarding,
     Invitation,
     Lineup,
     Match,
@@ -30,6 +29,8 @@ from .domain.records import (
     Team,
     User,
 )
+from .facebook import ONBOARDING_COOKIE
+from .facebook import router as facebook_router
 from .security import (
     COOKIE,
     DB,
@@ -84,6 +85,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Idempotency-Key"],
 )
 api = APIRouter(prefix="/api/v1")
+api.include_router(facebook_router)
 
 
 @app.middleware("http")
@@ -160,147 +162,8 @@ def public_config():
         "demo_enabled": settings.demo_enabled,
         "registration_enabled": settings.registration_enabled,
         "facebook_auth_enabled": settings.facebook_auth_enabled,
+        "facebook_roster_claiming_enabled": settings.facebook_roster_claiming_enabled,
     }
-
-
-@api.get("/auth/facebook/login")
-def facebook_login(request: Request):
-    if not settings.facebook_auth_enabled:
-        raise HTTPException(403, "Facebook authentication is disabled")
-    if (
-        not settings.facebook_app_id
-        or not settings.facebook_app_secret
-        or (not settings.facebook_redirect_uri)
-    ):
-        raise HTTPException(503, "Facebook authentication is not configured")
-    invite_token = request.query_params.get("invite") or ""
-    state = secrets.token_urlsafe(32)
-    redirect = RedirectResponse(
-        f"https://www.facebook.com/v20.0/dialog/oauth?{urlencode({'client_id': settings.facebook_app_id, 'redirect_uri': settings.facebook_redirect_uri, 'scope': 'email,public_profile', 'response_type': 'code', 'state': state})}",
-        status_code=302,
-    )
-    redirect.set_cookie(
-        "facebook_oauth_state",
-        state,
-        httponly=True,
-        secure=settings.cookie_secure,
-        samesite="lax",
-        path="/api",
-    )
-    if invite_token:
-        redirect.set_cookie(
-            "facebook_oauth_invite",
-            invite_token,
-            httponly=True,
-            secure=settings.cookie_secure,
-            samesite="lax",
-            path="/api",
-        )
-    else:
-        redirect.delete_cookie("facebook_oauth_invite", path="/api")
-    return redirect
-
-
-@api.get("/auth/facebook/callback")
-def facebook_callback(request: Request, db: DB):
-    if not settings.facebook_auth_enabled:
-        raise HTTPException(403, "Facebook authentication is disabled")
-    if (
-        not settings.facebook_app_id
-        or not settings.facebook_app_secret
-        or (not settings.facebook_redirect_uri)
-    ):
-        raise HTTPException(503, "Facebook authentication is not configured")
-    state = request.query_params.get("state")
-    stored_state = request.cookies.get("facebook_oauth_state")
-    if not state or not stored_state or (not secrets.compare_digest(state, stored_state)):
-        raise HTTPException(400, "Facebook sign-in was cancelled or tampered with")
-    invite_token = request.cookies.get("facebook_oauth_invite") or ""
-    code = request.query_params.get("code")
-    if not code:
-        raise HTTPException(400, "Facebook sign-in did not return an authorization code")
-    try:
-        token_response = httpx.post(
-            "https://graph.facebook.com/v20.0/oauth/access_token",
-            data={
-                "client_id": settings.facebook_app_id,
-                "client_secret": settings.facebook_app_secret,
-                "redirect_uri": settings.facebook_redirect_uri,
-                "code": code,
-            },
-            timeout=10,
-        )
-        if hasattr(token_response, "raise_for_status"):
-            token_response.raise_for_status()
-        access_token = token_response.json().get("access_token")
-    except (httpx.HTTPError, ValueError, AttributeError):
-        raise HTTPException(502, "Facebook sign-in failed while exchanging the authorization code") from None
-    if not access_token:
-        raise HTTPException(400, "Facebook did not return an access token")
-    try:
-        profile_response = httpx.get(
-            "https://graph.facebook.com/v20.0/me",
-            params={"fields": "id,email,name", "access_token": access_token},
-            timeout=10,
-        )
-        if hasattr(profile_response, "raise_for_status"):
-            profile_response.raise_for_status()
-        profile = profile_response.json()
-    except (httpx.HTTPError, ValueError, AttributeError):
-        raise HTTPException(502, "Facebook sign-in failed while fetching your profile") from None
-    facebook_id = str(profile.get("id") or "").strip()
-    email = (profile.get("email") or "").strip().lower()
-    if not facebook_id or not email:
-        raise HTTPException(400, "Facebook profile did not include the required email address")
-
-    def finish(db):
-        user = db.first(User, email=email)
-        if user:
-            if not db.get(Player, user.player_id).active:
-                raise HTTPException(401, "Account is unavailable")
-            return user.id
-        if not settings.registration_enabled and (not invite_token):
-            raise HTTPException(403, "Registration is closed. Contact a captain.")
-        if invite_token:
-            invitation = next(
-                iter(
-                    [
-                        row
-                        for row in db.records(Invitation)
-                        if row.token_hash == hashlib.sha256(invite_token.encode()).hexdigest()
-                        and row.used is False
-                        and (row.expires_at > datetime.now(timezone.utc))
-                    ]
-                ),
-                None,
-            )
-            if not invitation or invitation.email != email:
-                raise HTTPException(403, "Invitation is invalid, expired, or for a different email address")
-            player = require(db, Player, invitation.player_id)
-            if not player.active or db.first(User, player_id=player.id):
-                raise HTTPException(409, "This profile cannot be claimed. Contact your administrator.")
-            invitation.used = True
-        else:
-            player = Player(name=profile.get("name") or "Facebook User", team_id=None)
-            db.insert(player)
-        if db.first(User, email=email):
-            raise HTTPException(409, "Unable to register this email. Try signing in.")
-        user = User(
-            email=email, password_hash=password_hasher.hash(secrets.token_urlsafe(32)), player_id=player.id
-        )
-        db.insert(user)
-        return user.id
-
-    user_id = db.store.execute(finish)
-    current = db.store.read()
-    user = current.get(User, user_id)
-    if not user or not current.get(Player, user.player_id).active:
-        raise HTTPException(401, "Account is unavailable")
-    redirect = RedirectResponse(f"{settings.frontend_url}/", status_code=302)
-    redirect.delete_cookie("facebook_oauth_state", path="/api")
-    redirect.delete_cookie("facebook_oauth_invite", path="/api")
-    set_session(redirect, user)
-    return redirect
 
 
 @api.post("/auth/login")
@@ -373,6 +236,7 @@ def register(data: S.Register, request: Request, response: Response, db: DB):
 @command
 def logout(response: Response, user: CurrentUser, db: DB):
     user.session_version += 1
+    response.delete_cookie(ONBOARDING_COOKIE, path="/api")
     response.delete_cookie(COOKIE, path="/api", httponly=True, secure=settings.cookie_secure, samesite="lax")
 
 
@@ -477,7 +341,9 @@ def invite_member(player_id: int, data: S.InviteInput, user: Admin, db: DB):
         raise HTTPException(400, "Only active players without accounts can be invited")
     if db.first(User, email=data.email.lower()):
         raise HTTPException(409, "This email already has a club account")
-    db.remove_where(Invitation, player_id=player_id)
+    for previous in db.records(Invitation, player_id=player_id):
+        db.remove_where(FacebookOnboarding, invitation_id=previous.id)
+        db.remove(previous)
     token = secrets.token_urlsafe(32)
     db.insert(
         Invitation(
