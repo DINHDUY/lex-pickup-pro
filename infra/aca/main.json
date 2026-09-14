@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.47.16.16243",
-      "templateHash": "3842059638178855978"
+      "templateHash": "7261055604105742987"
     }
   },
   "parameters": {
@@ -240,7 +240,7 @@
               },
               {
                 "name": "CORS_ORIGINS",
-                "value": "[format('[[\"{0}\"]', variables('frontendOrigin'))]"
+                "value": "[format('[[\"{0}\",\"{1}\"]', variables('frontendOrigin'), format('https://{0}-frontend.{1}', parameters('appName'), reference(resourceId('Microsoft.App/managedEnvironments', format('{0}-env', parameters('appName'))), '2024-03-01').defaultDomain))]"
               },
               {
                 "name": "CLUB_INVITE_CODE",
@@ -468,6 +468,10 @@
           },
           "environmentVariables": {
             "value": [
+              {
+                "name": "NGINX_ENTRYPOINT_LOCAL_RESOLVERS",
+                "value": "1"
+              },
               {
                 "name": "BACKEND_URL",
                 "value": "[format('https://{0}', reference(resourceId('Microsoft.Resources/deployments', 'backend-app'), '2025-04-01').outputs.fqdn.value)]"

@@ -57,6 +57,7 @@ param registrationEnabled bool = false
 param cosmosClubId string = 'lex-pickup'
 
 var frontendOrigin = 'https://${frontendHost}'
+var frontendAcaOrigin = 'https://${appName}-frontend.${managedEnvironment.properties.defaultDomain}'
 var backendImageResolved = backendImage
 var frontendImageResolved = frontendImage
 
@@ -131,7 +132,8 @@ module backend 'modules/container-app.bicep' = {
       }
       {
         name: 'CORS_ORIGINS'
-        value: '[["${frontendOrigin}"]'
+        // Escape the leading '[' for the nested ARM deployment.
+        value: '[["${frontendOrigin}","${frontendAcaOrigin}"]'
       }
       {
         name: 'CLUB_INVITE_CODE'
@@ -163,6 +165,10 @@ module frontend 'modules/container-app.bicep' = {
     minReplicas: frontendMinReplicas
     maxReplicas: frontendMaxReplicas
     environmentVariables: [
+      {
+        name: 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS'
+        value: '1'
+      }
       {
         name: 'BACKEND_URL'
         value: 'https://${backend.outputs.fqdn}'
