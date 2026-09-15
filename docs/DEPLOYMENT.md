@@ -215,3 +215,17 @@ az containerapp update \
 ```
 
 The flag defaults to false. The Bicep equivalent is `facebookRosterClaimingEnabled=true`. SQL requires the new Alembic migration; Cosmos requires the new backend on all workers before any new Facebook identity records are written. See [the implementation and rollout details](FACEBOOK_ONBOARDING_PLAN.md#storage-and-rollout), including the Cosmos compatibility check and rollback constraints.
+
+### Facebook reports “App not active”
+
+This message on `facebook.com` means Meta is blocking access to the Facebook app before authorization returns to our callback. A healthy backend and `FACEBOOK_AUTH_ENABLED=true` do not establish that Meta has enabled public access. Development mode is a likely cause when app administrators, developers, or testers can sign in but ordinary club members cannot; a disabled app can also produce this message.
+
+1. Inspect the redirect from `/api/v1/auth/facebook/login` in browser developer tools. Its `client_id` identifies the deployed Facebook app. Open that same app in [Meta for Developers](https://developers.facebook.com/apps/); local environment files may refer to a different app.
+2. Check the app's publication status. Make it **Live** or **Published**, depending on the dashboard interface, to support ordinary members. Complete the requirements Meta lists, including privacy policy and user-data deletion information and any permission access or verification requirements shown for `email` and `public_profile`. Adding members as app testers is only a development workaround.
+3. If the app is already public, check dashboard alerts and required actions for restrictions, deactivation, or overdue data-use requirements. Resolve the stated issue and follow Meta's reactivation or appeal flow when required.
+4. Confirm Facebook Login is configured for the website and its Valid OAuth Redirect URIs includes exactly `https://www.lex-pickup-pro.us/api/v1/auth/facebook/callback`. A redirect mismatch is a separate configuration issue; correcting it does not reactivate a disabled app.
+5. Retry from our login page with a Facebook account that has **no app role**. Test through Messenger as well as a regular browser, and verify that a first-time member reaches profile claiming.
+
+Changing browsers, enabling club registration, or changing the roster-claiming flag does not change Meta's publication status. Keep the same Facebook app when resolving its status: existing identity bindings include the app ID. Dashboard-only activation changes do not require an application redeploy.
+
+Members who already have an email/password credential can use **Sign in with email and password** while Facebook is unavailable. Facebook-created accounts need an [administrator-assisted password reset](#password-recovery) before they can use this fallback. Members without an account need a profile invitation to register with email/password while code-based registration is closed.
