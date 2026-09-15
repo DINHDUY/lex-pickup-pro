@@ -216,6 +216,20 @@ az containerapp update \
 
 The flag defaults to false. The Bicep equivalent is `facebookRosterClaimingEnabled=true`. SQL requires the new Alembic migration; Cosmos requires the new backend on all workers before any new Facebook identity records are written. See [the implementation and rollout details](FACEBOOK_ONBOARDING_PLAN.md#storage-and-rollout), including the Cosmos compatibility check and rollback constraints.
 
+### Facebook reports “Can't load URL” / domain isn't included
+
+This error means Meta is rejecting the URL before authorization returns to our backend. Check the `client_id` and decoded `redirect_uri` in the redirect from `/api/v1/auth/facebook/login` to identify the app and callback actually used by production. For the production app `2138092870108670`, configure:
+
+| Meta dashboard setting | Value |
+| --- | --- |
+| **App settings → Basic → App Domains** | `lex-pickup-pro.us` and `www.lex-pickup-pro.us`, as separate entries without a scheme, path, or trailing slash |
+| **App settings → Basic → Website → Site URL** | `https://www.lex-pickup-pro.us/` (add the Website platform if it is missing) |
+| **Facebook Login → Settings → Valid OAuth Redirect URIs** | `https://www.lex-pickup-pro.us/api/v1/auth/facebook/callback` |
+
+Open [the production app's Basic settings](https://developers.facebook.com/apps/2138092870108670/settings/basic/) to set App Domains. Facebook Login settings may instead appear under **Use cases → Facebook Login → Customize → Settings**, depending on the dashboard layout. Enable **Client OAuth Login** and **Web OAuth Login**, and retain HTTPS and strict redirect matching. The OAuth redirect entry must match the backend's callback exactly, including `www` and the path, with no trailing slash.
+
+Save each settings page, then start a fresh sign-in from `https://www.lex-pickup-pro.us/login`. If available, use Meta's redirect URI validator to check the callback before retrying. These Meta settings changes do not require a redeploy when the deployed app ID and callback already match. Verify with an ordinary member account that authorization returns to the site and opens the account or profile-claiming flow.
+
 ### Facebook reports “App not active”
 
 This message on `facebook.com` means Meta is blocking access to the Facebook app before authorization returns to our callback. A healthy backend and `FACEBOOK_AUTH_ENABLED=true` do not establish that Meta has enabled public access. Development mode is a likely cause when app administrators, developers, or testers can sign in but ordinary club members cannot; a disabled app can also produce this message.
